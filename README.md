@@ -22,6 +22,7 @@ A terminal UI around the bb ecosystem. **Phase 1 spike complete** — see
   stop / `c` compact / `m` model); per-thread cursors; archived threads
   excluded; discovery cached; status refreshes event-gated.
   Set `BB_TUI_DEBUG=1` to append buffer counters to the context line.
+  `ctrl-l` forces a full repaint, and a resize repaints rather than diffing.
 - ⏭ Next: Phase 3 — terminals panes, queue UX, bundled single-file client.
 
 ## Pi provider note
@@ -64,6 +65,17 @@ Requires a bb server on loopback (the bb app or `bb` daemon). Discovery:
   to avoid retained border fragments during incremental repaints. This behavior
   is verified in exact-size tmux renders; Termius remains a client-specific
   device check because it is not available in the local test environment.
+- Termius on iOS intermittently garbles the frame, usually the bottom border.
+  The corruption is client-side — it appears in other full-screen TUIs too — so
+  the client cannot prevent it, only recover: `ctrl-l` forces a complete rewrite
+  of every cell, and a resize (the iOS keyboard opening and closing is the
+  common trigger) repaints instead of letting Ink diff against a frame the
+  client may have mangled.
+- Repainting cannot go through Ink's `clear()`. That erases the screen but
+  leaves `lastOutput` set, and Ink skips writing when the next frame matches it,
+  so the screen stays blank until something genuinely changes. The client
+  renders one throwaway frame instead, which differs from both its neighbours
+  and so forces two writes, the second repainting everything.
 
 ## Layout
 

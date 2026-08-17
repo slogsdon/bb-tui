@@ -3,7 +3,7 @@
 // composer). Tab switches focus between list and composer. Performance:
 // discovery is cached, status refreshes fire only on status-relevant events,
 // and timeline refreshes are throttled to the open thread.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
   compactThread,
@@ -47,6 +47,10 @@ const MAX_INPUT_ROWS = 3;
 const MAX_TRANSCRIPT_BLOCKS = 200;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
+
+// Erase screen + scrollback, cursor home. Written as escapes rather than literal
+// control bytes so the source stays plain ASCII.
+const CLEAR_SCREEN = "\u001B[2J\u001B[3J\u001B[H";
 
 /** Apply an input chunk: erase bytes pop, printable chars append, control
  * dropped. Handles batched keystrokes and Ink's inconsistent backspace/delete
@@ -118,6 +122,7 @@ export default function App() {
   const [filtering, setFiltering] = useState(false);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [clockTick, setClockTick] = useState(0);
+  const [repainting, setRepainting] = useState(false);
   const [scrollUp, setScrollUp] = useState(0);
   const [modelHints, setModelHints] = useState<string[]>([]);
 
@@ -136,6 +141,43 @@ export default function App() {
   const focusRef = useRef<"list" | "detail">("list");
   useEffect(() => void (viewRef.current = view), [view]);
   useEffect(() => void (focusRef.current = focus), [focus]);
+
+  // Force a complete rewrite of every cell. Recovery, not prevention: the
+  // corruption happens in the client (Termius on iOS garbles the bottom border),
+  // and Ink's incremental redraw leaves the damage there indefinitely.
+  //
+  // Ink's own clear() is not enough — it erases the screen but leaves lastOutput
+  // set, and render() skips writing when the new output matches it, so the
+  // screen stays blank until something genuinely changes. Render one throwaway
+  // frame instead: it differs from the frame before it and from the frame after,
+  // so Ink writes both, and the second write repaints everything.
+  const repaint = useCallback(() => {
+    stdout.write(CLEAR_SCREEN);
+    setRepainting(true);
+  }, [stdout]);
+
+  useEffect(() => {
+    if (!repainting) return;
+    const t = setTimeout(() => setRepainting(false), 16);
+    return () => clearTimeout(t);
+  }, [repainting]);
+
+  // A resize is the likeliest moment to inherit a garbled frame — the iOS
+  // keyboard opening or closing fires several in a burst — so repaint instead
+  // of letting Ink diff against a frame the client may have mangled. Debounced
+  // so a burst costs one redraw, not one per event.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onResize = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(repaint, 100);
+    };
+    stdout.on("resize", onResize);
+    return () => {
+      if (timer) clearTimeout(timer);
+      stdout.off("resize", onResize);
+    };
+  }, [stdout, repaint]);
 
   // Bootstrap.
   useEffect(() => {
@@ -425,6 +467,8 @@ export default function App() {
   // ---- keyboard ----
   useInput((data, key) => {
     if (key.ctrl && data === "c") return exit();
+    // Checked before every mode so it works from the composer and filter too.
+    if (key.ctrl && data === "l") return repaint();
 
     // Filter mode owns every keystroke until it is dismissed, otherwise typing
     // a title would trigger the single-key actions underneath it.
@@ -656,6 +700,11 @@ export default function App() {
         <Text dimColor>hint: install the bb-tui plugin or set BB_TUI_SERVER_URL</Text>
       </Box>
     );
+  }
+
+  // One frame of nothing, so the frame after it is written in full. See repaint().
+  if (repainting) {
+    return <Text> </Text>;
   }
 
   if (view.kind === "spawn") {

@@ -105,7 +105,8 @@ export default function App() {
   const tailRef = useRef<BufferedEvent[]>([]);
   const transcriptsRef = useRef(new Map<string, string>());
   const reasoningRef = useRef(new Map<string, string>());
-  const userMsgsRef = useRef(new Map<string, string[]>()); // threadId -> "U: …" in arrival order
+  const userMsgsRef = useRef(new Map<string, string[]>()); // optimistic "U: …" (deduped vs timeline at render)
+  const lastTimelineRefreshRef = useRef(0);
   const pollMsRef = useRef(800);
   const viewRef = useRef<View>({ kind: "list" });
   const threadsRef = useRef<ThreadRow[]>([]);
@@ -178,8 +179,23 @@ export default function App() {
           tailRef.current = next;
           setTail(next);
           assembleTranscripts(fresh);
-          collectUserMsgs(fresh);
           refreshThreadStatuses();
+        }
+        // Throttled timeline refresh for the open thread: keeps server order
+        // authoritative for user messages (buffer deltas only carry agent text).
+        const now = Date.now();
+        if (
+          focusId &&
+          now - lastTimelineRefreshRef.current > 4000 &&
+          info
+        ) {
+          lastTimelineRefreshRef.current = now;
+          try {
+            const { items } = await getTimeline(info, focusId);
+            setTimeline(items.flatMap((i) => timelineLines(i)).slice(-120));
+          } catch {
+            // non-fatal; next cycle retries
+          }
         }
       } catch (err) {
         setStatus(`buffer poll error: ${String(err)}`);
@@ -202,26 +218,10 @@ export default function App() {
     }
   }
 
-  // User messages arrive via client/turn/requested with data.input =
-  // [{ type: "text", text: "…" }]. Concatenate them into per-thread history.
-  function collectUserMsgs(events: BufferedEvent[]) {
-    for (const e of events) {
-      if (e.type !== "client/turn/requested") continue;
-      const input = (e.payload?.data as { input?: unknown } | undefined)?.input;
-      const text = Array.isArray(input)
-        ? input
-            .map((p) => (p && typeof p === "object" && "text" in p ? String((p as { text: unknown }).text) : ""))
-            .join("")
-            .trim()
-        : "";
-      if (!text) continue;
-      const list = userMsgsRef.current.get(e.threadId) ?? [];
-      const line = `U: ${text}`;
-      if (list[list.length - 1] !== line) {
-        userMsgsRef.current.set(e.threadId, [...list.slice(-60), line]);
-      }
-    }
-  }
+  // User messages: the server timeline is authoritative, so buffered turn
+  // requests are not added to history. `userMsgsRef` holds only optimistic
+  // entries (sent from this client) and is deduped against the timeline at
+  // render time.
 
   // Merge fresh statuses in place, sorting stays stable. If the open detail
   // thread changed, sync its snapshot so the header reflects live state.
@@ -268,7 +268,6 @@ export default function App() {
       setTimeline(items.flatMap((i) => timelineLines(i)).slice(-120));
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
       assembleTranscripts(evs);
-      collectUserMsgs(evs);
       setStatus(`${t.providerId} · ${t.status} · ${t.id}${active ? " ●" : ""}`);
     } catch (err) {
       setStatus(`timeline error: ${String(err)}`);
@@ -435,7 +434,7 @@ export default function App() {
         }
       }
     }
-    const users = userMsgsRef.current.get(view.thread.id) ?? [];
+    const users = (userMsgsRef.current.get(view.thread.id) ?? []).filter((l) => !timeline.includes(l));
     return { lines: [...timeline, ...users, ...agent], live: focusedEvents.length };
   }, [timeline, focusedEvents, hideReasoning, view]);
 

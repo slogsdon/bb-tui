@@ -3,7 +3,7 @@
 // composer). Tab switches focus between list and composer. Performance:
 // discovery is cached, status refreshes fire only on status-relevant events,
 // and timeline refreshes are throttled to the open thread.
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
   compactThread,
@@ -28,6 +28,8 @@ import {
   type Project,
   type ThreadRow,
 } from "./api.js";
+import { calculatePaneLayout, WorkspaceLayout } from "./layout.js";
+import { enterAlternateScreen } from "./terminal.js";
 
 type View =
   | { kind: "home" }
@@ -37,7 +39,6 @@ type View =
 
 const MAX_TAIL = 600;
 const MAX_TRANSCRIPT_CHARS = 600;
-const DETAIL_CHROME = 9; // header, border, meta, composer(3), hint
 const MAX_INPUT_ROWS = 3;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
@@ -72,14 +73,6 @@ function wrapToWidth(text: string, width: number): string[] {
   if (out.length === 0) out.push("");
   return out;
 }
-
-const STATUS_STYLE: Record<string, { glyph: string; color: string }> = {
-  active: { glyph: "●", color: "green" },
-  starting: { glyph: "◐", color: "yellow" },
-  stopping: { glyph: "◌", color: "yellow" },
-  error: { glyph: "✗", color: "red" },
-  idle: { glyph: "○", color: "gray" },
-};
 
 // Event types that change a thread's status row (everything else is content).
 const STATUS_EVENTS = new Set([
@@ -495,34 +488,17 @@ export default function App() {
     return m;
   }, [tail]);
 
-  const innerW = Math.max(20, cols - 6);
+  const paneLayout = calculatePaneLayout(cols, focus);
+  const detailInnerW = Math.max(8, (paneLayout.detailWidth || cols - 1) - 4);
   const inputRows = useMemo(() => {
     if (!input) return [""];
-    return wrapToWidth(input, innerW).slice(-MAX_INPUT_ROWS);
-  }, [input, innerW]);
+    return wrapToWidth(input, detailInnerW).slice(-MAX_INPUT_ROWS);
+  }, [input, detailInnerW]);
 
   const detailLines = useMemo(
-    () => (view.kind === "detail" ? conversation.lines.flatMap((l) => wrapToWidth(l, innerW)) : []),
-    [conversation, innerW, view],
+    () => (view.kind === "detail" ? conversation.lines.flatMap((l) => wrapToWidth(l, detailInnerW)) : []),
+    [conversation, detailInnerW, view],
   );
-
-  // ---- render helpers ----
-  const renderThreadRow = (t: ThreadRow, selected: boolean, marker: string | undefined, width: number) => {
-    const st = STATUS_STYLE[t.status] ?? STATUS_STYLE.idle!;
-    const title = (t.title ?? t.titleFallback ?? t.id).slice(0, Math.max(20, width - 22));
-    return (
-      <Text key={t.id} color={selected ? "green" : undefined} wrap="truncate">
-        {selected ? "› " : "  "}
-        {t.pinnedAt ? "📌" : " "}
-        <Text color={st.color}>{st.glyph}</Text> {t.providerId.padEnd(8).slice(0, 8)} {title}
-        {marker && (
-          <Text dimColor>
-            {" "}⟶ {marker.slice(0, Math.max(10, width - 34))}
-          </Text>
-        )}
-      </Text>
-    );
-  };
 
   // ---- rendering ----
   if (error) {
@@ -570,128 +546,55 @@ export default function App() {
     );
   }
 
-  const leftW = Math.max(34, Math.floor(cols * 0.4));
-  const rightW = cols - leftW - 2;
   const firstVisible = Math.max(0, sel - 4);
-  const visibleCount = Math.max(4, rows - 12);
-  const visibleThreads = threads.slice(firstVisible, firstVisible + visibleCount);
+  const visibleCount = Math.max(4, rows - 6);
 
   return (
-    <Box flexDirection="column">
-      {/* top bar */}
-      <Text wrap="truncate">
-        <Text color="cyan" bold>
-          bb-tui
-        </Text>
-        <Text dimColor>
-          {" "}· {status} · {projects.size} projects · {threads.length} threads · tab=focus
-        </Text>
-      </Text>
-
-      <Box flexDirection="row" height={rows - 3}>
-        {/* left: thread list */}
-        <Box flexDirection="column" width={leftW} borderStyle="round">
-          {threads.length === 0 && <Text dimColor>no threads</Text>}
-          {visibleThreads.map((t, i) =>
-            renderThreadRow(t, firstVisible + i === sel, byThread.get(t.id), leftW - 4),
-          )}
-          {threads.length > visibleCount && <Text dimColor>… {threads.length - visibleCount} more</Text>}
-          <Text dimColor wrap="truncate">
-            ↑/↓ select · enter open · n new · esc/q close
+    <WorkspaceLayout
+      columns={cols}
+      rows={rows}
+      focus={focus}
+      topBar={
+        <>
+          <Text color="cyan" bold>
+            bb-tui
           </Text>
-        </Box>
-
-        {/* right: thread pane */}
-        <Box flexDirection="column" width={rightW} borderStyle="round">
-          {view.kind === "detail" ? (
-            <ThreadPane
-              view={view}
-              projects={projects}
-              timeline={timeline}
-              conversation={conversation}
-              detailLines={detailLines}
-              scrollUp={scrollUp}
-              input={input}
-              inputRows={inputRows}
-              status={status}
-              focus={focus}
-              rows={rows}
-              hideReasoning={hideReasoning}
-              cursorSeq={cursorRef.current}
-            />
-          ) : (
-            <Box flexDirection="column">
-              <Text dimColor>select a thread (↑/↓, enter) or press n for a new thread</Text>
-              <Text dimColor wrap="truncate">
-                tab switches focus to the composer once a thread is open
-              </Text>
-            </Box>
-          )}
-        </Box>
-      </Box>
-    </Box>
-  );
-}
-
-function ThreadPane(props: {
-  view: Extract<View, { kind: "detail" }>;
-  projects: Map<string, string>;
-  timeline: string[];
-  conversation: { lines: string[]; live: number };
-  detailLines: string[];
-  scrollUp: number;
-  input: string;
-  inputRows: string[];
-  status: string;
-  focus: "list" | "detail";
-  rows: number;
-  hideReasoning: boolean;
-  cursorSeq: number;
-}) {
-  const t = props.view.thread;
-  const active = t.status === "active" || t.status === "starting";
-  const visibleCount = Math.max(3, props.rows - DETAIL_CHROME);
-  const scrollable = Math.max(0, props.detailLines.length - visibleCount);
-  const clamped = Math.min(props.scrollUp, scrollable);
-  const from = Math.max(0, props.detailLines.length - visibleCount - clamped);
-  const visible = props.detailLines.slice(from, from + visibleCount);
-  return (
-    <>
-      <Text wrap="truncate">
-        <Text color="cyan" bold>
-          {(t.title ?? t.titleFallback ?? t.id).slice(0, 60)}
-        </Text>
-        <Text dimColor>
-          {" "}
-          {props.projects.get(t.projectId) ?? t.projectId} · {t.providerId} · {t.status}
-          {active ? " ●" : ""}
-        </Text>
-      </Text>
-      <Box flexDirection="column" height={visibleCount} marginTop={0}>
-        {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
-        {visible.map((line, i) => (
-          <Text key={`${from + i}`} wrap="truncate">
-            {line.startsWith("U: ") ? <Text color="blue">{line}</Text> : line.startsWith("A: ") ? <Text color="green">{line}</Text> : <Text dimColor={line.startsWith("—") || line.startsWith("💭")}>{line}</Text>}
+          <Text dimColor>
+            {" "}· {status} · {projects.size} projects · {threads.length} threads · tab=focus
           </Text>
-        ))}
-      </Box>
-      <Text dimColor wrap="truncate">
-        {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`} · history {props.timeline.length} · live {props.conversation.live} · seq{" "}
-        {props.cursorSeq}
-      </Text>
-      {props.inputRows.map((l, i) => (
-        <Text key={i} wrap="truncate">
-          {i === props.inputRows.length - 1 ? `> ` : `  `}
-          <Text color={active ? "green" : "white"}>{l === "" ? " " : l}</Text>
-        </Text>
-      ))}
-      <Text dimColor wrap="truncate">
-        {props.focus === "detail" ? "▶ composer " : "tab → composer "}
-        enter=tell ↑↓=scroll r/x/c/m esc/q=home · {props.status}
-      </Text>
-    </>
+        </>
+      }
+      list={{
+        threads,
+        selectedIndex: sel,
+        firstVisible,
+        visibleCount,
+        activityByThread: byThread,
+      }}
+      detail={
+        view.kind === "detail"
+          ? {
+              thread: view.thread,
+              projectName: projects.get(view.thread.projectId) ?? view.thread.projectId,
+              timelineLength: timeline.length,
+              conversationLive: conversation.live,
+              detailLines,
+              scrollUp,
+              inputRows,
+              focus,
+              cursorSeq: cursorRef.current,
+            }
+          : undefined
+      }
+    />
   );
 }
 
 // TUI entry: `tsx src/index.tsx`
-render(<App />);
+const restoreScreen = process.stdout.isTTY ? enterAlternateScreen(process.stdout) : () => {};
+process.once("exit", restoreScreen);
+const instance = render(<App />);
+void instance.waitUntilExit().finally(() => {
+  restoreScreen();
+  process.off("exit", restoreScreen);
+});

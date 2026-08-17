@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx src/index.tsx",
     "cli": "tsx src/cli.ts",
+    "test": "tsx --test src/*.test.*",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

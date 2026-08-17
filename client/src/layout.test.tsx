@@ -261,7 +261,9 @@ test("the model and permission mode replace the provider once bb reports them", 
     height: 24,
   });
 
-  assert.deepEqual(parts, ["bb-tui", "claude-opus-5[1m]", "perm auto", "idle"]);
+  // Permission mode precedes the model: the row truncates from the right, and a
+  // half-rendered permission mode is worse than a half-rendered model id.
+  assert.deepEqual(parts, ["bb-tui", "auto", "claude-opus-5[1m]", "idle"]);
   // The provider id is implied by the model, so it does not also take a slot.
   assert.ok(!parts.includes("codex"));
 });

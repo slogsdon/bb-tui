@@ -163,10 +163,13 @@ export function contextRow(props: ThreadPaneProps): string[] {
     props.projectName,
     props.hostNames.get(thread.environmentHostId ?? "") ?? "",
     thread.environmentBranchName ?? "",
+    // Permission mode precedes the model because the row truncates from the
+    // right: a bounded enum is useless half-rendered, while a model id stays
+    // recognizable. It is also the one fact here with safety consequences.
+    props.execution?.permissionMode ?? "",
     // The model is the more specific fact and implies the provider, so it takes
     // the slot rather than adding one. Provider stands in until it arrives.
     props.execution?.model ?? thread.providerId,
-    props.execution ? `perm ${props.execution.permissionMode}` : "",
     running && props.elapsedSeconds !== null
       ? `working ${props.elapsedSeconds}s · esc to interrupt`
       : thread.status,

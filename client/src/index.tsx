@@ -495,12 +495,6 @@ export default function App() {
     return m;
   }, [tail]);
 
-  const needsAttention = useMemo(
-    () => threads.filter((t) => t.status === "error" || t.status === "active" || t.status === "starting"),
-    [threads],
-  );
-  const recent = useMemo(() => threads.filter((t) => !needsAttention.includes(t)), [threads, needsAttention]);
-
   const innerW = Math.max(20, cols - 6);
   const inputRows = useMemo(() => {
     if (!input) return [""];
@@ -519,6 +513,7 @@ export default function App() {
     return (
       <Text key={t.id} color={selected ? "green" : undefined} wrap="truncate">
         {selected ? "› " : "  "}
+        {t.pinnedAt ? "📌" : " "}
         <Text color={st.color}>{st.glyph}</Text> {t.providerId.padEnd(8).slice(0, 8)} {title}
         {marker && (
           <Text dimColor>
@@ -578,7 +573,8 @@ export default function App() {
   const leftW = Math.max(34, Math.floor(cols * 0.4));
   const rightW = cols - leftW - 2;
   const firstVisible = Math.max(0, sel - 4);
-  const visibleSel = Math.max(0, sel - firstVisible);
+  const visibleCount = Math.max(4, rows - 12);
+  const visibleThreads = threads.slice(firstVisible, firstVisible + visibleCount);
 
   return (
     <Box flexDirection="column">
@@ -595,17 +591,13 @@ export default function App() {
       <Box flexDirection="row" height={rows - 3}>
         {/* left: thread list */}
         <Box flexDirection="column" width={leftW} borderStyle="round">
-          <Text dimColor wrap="truncate">
-            {needsAttention.length > 0 ? "NEEDS ATTENTION" : ""}
-          </Text>
-          {needsAttention.length === 0 && recent.length === 0 && <Text dimColor>no threads</Text>}
-          {needsAttention.map((t, i) => renderThreadRow(t, i === visibleSel && sel === firstVisible + i, byThread.get(t.id), leftW - 4))}
-          {needsAttention.length > 0 && <Text dimColor>── recent ──</Text>}
-          {recent.slice(0, Math.max(4, rows - 16)).map((t, i) =>
-            renderThreadRow(t, false, byThread.get(t.id), leftW - 4),
+          {threads.length === 0 && <Text dimColor>no threads</Text>}
+          {visibleThreads.map((t, i) =>
+            renderThreadRow(t, firstVisible + i === sel, byThread.get(t.id), leftW - 4),
           )}
+          {threads.length > visibleCount && <Text dimColor>… {threads.length - visibleCount} more</Text>}
           <Text dimColor wrap="truncate">
-            ↑/↓ select · enter open · n new · esc/q home
+            ↑/↓ select · enter open · n new · esc/q close
           </Text>
         </Box>
 

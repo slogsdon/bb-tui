@@ -1,0 +1,24 @@
+{
+  "name": "@bb-tui/client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "bb-tui": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.tsx",
+    "cli": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ink": "^5.2.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0"
+  }
+}

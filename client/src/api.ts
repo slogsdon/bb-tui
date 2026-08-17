@@ -183,6 +183,24 @@ export async function listMachines(): Promise<Machine[]> {
   return bbJson<Machine[]>(["machine", "list"]);
 }
 
+export interface Skill {
+  id: string;
+  name: string;
+  description?: string;
+  scope?: string;
+  [k: string]: unknown;
+}
+
+/** Skills bb knows about, for slash completion. Project-scoped, since project
+ * skills override user and builtin ones. Cached by caller: the menu filters on
+ * every keystroke and this is a ~300ms subprocess. */
+export async function listSkills(projectId?: string): Promise<Skill[]> {
+  const args = ["skill", "list"];
+  if (projectId) args.push("--project", projectId);
+  const res = await bbJson<{ skills?: Skill[] } | Skill[]>(args);
+  return Array.isArray(res) ? res : (res.skills ?? []);
+}
+
 export interface SpawnResult {
   id: string;
   [k: string]: unknown;

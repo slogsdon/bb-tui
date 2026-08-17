@@ -13,6 +13,7 @@ import {
   getTimeline,
   listMachines,
   listProjects,
+  listSkills,
   listThreads,
   loadCursor,
   providerModels,
@@ -31,7 +32,15 @@ import {
 } from "./api.js";
 import { calculatePaneLayout, WorkspaceLayout, type ListRow } from "./layout.js";
 import { renderBlocks, type TranscriptBlock } from "./markdown.js";
-import { applyKey, EMPTY, layoutComposer, type Composer } from "./composer.js";
+import {
+  applyKey,
+  EMPTY,
+  layoutComposer,
+  replaceToken,
+  slashTokenAt,
+  type Composer,
+} from "./composer.js";
+import { buildCatalog, matchEntries, resolveSlash, type CatalogEntry } from "./commands.js";
 import { enterAlternateScreen } from "./terminal.js";
 
 type View =
@@ -126,6 +135,9 @@ export default function App() {
   const [repainting, setRepainting] = useState(false);
   const [scrollUp, setScrollUp] = useState(0);
   const [modelHints, setModelHints] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
+  const [menuSel, setMenuSel] = useState(0);
+  const [menuDismissed, setMenuDismissed] = useState(false);
 
   const cursorRef = useRef(0);
   const threadCursorRef = useRef(new Map<string, number>());
@@ -365,6 +377,10 @@ export default function App() {
     setComposer(EMPTY);
     setScrollUp(0);
     setStatus(`opening ${t.id}`);
+    // Project-scoped, since project skills override user and builtin ones.
+    void listSkills(t.projectId)
+      .then((skills) => setCatalog(buildCatalog(skills)))
+      .catch(() => setCatalog(buildCatalog([])));
     try {
       const { items } = await getTimeline(info!, t.id);
       setTimeline(items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
@@ -374,6 +390,13 @@ export default function App() {
     } catch (err) {
       setStatus(`timeline error: ${String(err)}`);
     }
+  }
+
+  /** The bb-side implementation of a slash command. Kept next to the table it
+   * serves rather than inside it, so the table stays data. */
+  function runBbCommand(name: string, threadId: string): Promise<unknown> {
+    if (name === "compact") return compactThread(threadId);
+    return Promise.reject(new Error(`no bb implementation for /${name}`));
   }
 
   function backToHome() {
@@ -393,13 +416,28 @@ export default function App() {
   async function send() {
     if (view.kind !== "detail" || !composer.text.trim()) return;
     const tid = view.thread.id;
-    const text = composer.text.trim();
+    const resolved = resolveSlash(composer.text);
     setComposer(EMPTY);
     setScrollUp(0);
-    appendUserMsg(tid, text);
+
+    // A message that *is* a bb command runs the same operation the app composer
+    // does; `bb thread tell` is raw and would send the literal string instead.
+    if (resolved.kind === "command") {
+      setStatus(`running /${resolved.name}…`);
+      try {
+        await runBbCommand(resolved.name, tid);
+        setStatus(`/${resolved.name} done`);
+        refreshThreadStatuses();
+      } catch (err) {
+        setStatus(`/${resolved.name} error: ${String(err)}`);
+      }
+      return;
+    }
+
+    appendUserMsg(tid, resolved.text);
     setStatus("sending…");
     try {
-      await tellThread(tid, text);
+      await tellThread(tid, resolved.text);
       setStatus(`sent → ${view.thread.providerId}`);
       refreshThreadStatuses();
     } catch (err) {
@@ -527,6 +565,13 @@ export default function App() {
       // Composer focus. Every printable key belongs to the message — the
       // actions live on ctrl chords, because gating them on an empty composer
       // meant a message could not begin with those letters.
+      // With the menu open it owns enter, tab, the arrows and escape. Escape
+      // only dismisses it — a second escape leaves the composer.
+      if (menuOpen && !key.shift && (key.return || key.tab)) return acceptMenuEntry();
+      if (menuOpen && key.upArrow) return setMenuSel((s) => Math.max(0, s - 1));
+      if (menuOpen && key.downArrow) return setMenuSel((s) => Math.min(menuMatches.length - 1, s + 1));
+      if (menuOpen && key.escape) return setMenuDismissed(true);
+
       if (key.return && key.shift) setComposer((c) => applyKey(c, "\n", {}));
       else if (key.return) void send();
       else if (key.ctrl && data === "o") setComposer((c) => applyKey(c, "\n", {}));
@@ -676,6 +721,36 @@ export default function App() {
     }
   }
 
+  // Slash menu. The token rule is bb.app's: a slash at index 0 or after a
+  // space. Zero matches hides the menu, which is what keeps an absolute path
+  // from getting in the way.
+  const slashToken = useMemo(
+    () => (focus === "detail" && view.kind === "detail" ? slashTokenAt(composer) : null),
+    [composer, focus, view],
+  );
+  const menuMatches = useMemo(
+    () => (slashToken ? matchEntries(catalog, slashToken.text) : []),
+    [catalog, slashToken],
+  );
+  const menuOpen = menuMatches.length > 0 && !menuDismissed;
+
+  // Re-arm the menu whenever the token itself changes, so dismissing applies to
+  // the token you dismissed and not to the rest of the message.
+  const tokenText = slashToken?.text ?? null;
+  useEffect(() => {
+    setMenuDismissed(false);
+    setMenuSel(0);
+  }, [tokenText]);
+
+  function acceptMenuEntry() {
+    const entry = menuMatches[menuSel];
+    if (!slashToken || !entry) return;
+    setComposer((c) => {
+      const token = slashTokenAt(c);
+      return token ? replaceToken(c, token, entry.name) : c;
+    });
+  }
+
   // Latest meaningful activity per thread (content, not raw event names).
   const byThread = useMemo(() => {
     const m = new Map<string, string>();
@@ -795,6 +870,7 @@ export default function App() {
               detailLines,
               scrollUp,
               composer: composerLayout,
+              menu: menuOpen ? { entries: menuMatches, selected: menuSel } : undefined,
               focus,
               elapsedSeconds,
               debug: process.env.BB_TUI_DEBUG

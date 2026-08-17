@@ -88,9 +88,27 @@ actions there are ctrl chords.
 | `ctrl-p` | pick a model |
 | `tab`, `esc` | back to the list |
 
-`q` is an ordinary character here — use `esc` then `q` to quit. Two actions lose
-their mnemonic to the terminal rather than to preference: `ctrl-m` is Enter, and
-`ctrl-k` is kill-line, so compact and model take `ctrl-t` and `ctrl-p`.
+### Slash menu
+
+Typing a `/` at the start of the input or after a space opens a completion
+menu of bb commands and the skills bb knows about, matching bb.app.
+
+| Key | Action |
+|---|---|
+| `↑` `↓` | select |
+| `enter`, `tab` | accept the highlighted entry |
+| `esc` | dismiss the menu (a second `esc` leaves the composer) |
+
+A message that *is* `/compact` runs the bb thread operation, the same one the
+app composer produces — `bb thread tell` is raw and would send the literal
+string. Everything else passes through untouched: skills are resolved by the
+agent, and provider commands the TUI has never heard of still work. `//` sends
+a literal leading slash.
+
+In the composer `q` is an ordinary character — use `esc` then `q` to quit. Two
+actions lose their mnemonic to the terminal rather than to preference: `ctrl-m`
+is Enter, and `ctrl-k` is kill-line, so compact and model take `ctrl-t` and
+`ctrl-p`.
 
 ### Anywhere
 

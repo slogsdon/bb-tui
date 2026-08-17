@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import type { ThreadRow } from "./api.js";
 import type { MdLine } from "./markdown.js";
 import type { ComposerLayout } from "./composer.js";
+import type { CatalogEntry } from "./commands.js";
 
 export type PaneFocus = "list" | "detail";
 
@@ -137,6 +138,8 @@ export type ThreadPaneProps = {
   detailLines: MdLine[];
   scrollUp: number;
   composer: ComposerLayout;
+  /** Slash completion, when the token at the cursor matches something. */
+  menu?: { entries: CatalogEntry[]; selected: number };
   focus: PaneFocus;
   /** Seconds the current turn has been running, when one is. */
   elapsedSeconds: number | null;
@@ -170,6 +173,44 @@ export function contextRow(props: ThreadPaneProps): string[] {
   return parts.filter((p) => p !== "");
 }
 
+/** Rows the slash menu occupies, including its section headers. Capped so it
+ * can never crowd the transcript out entirely. */
+export const MENU_MAX_ENTRIES = 6;
+
+export function menuHeight(menu: ThreadPaneProps["menu"]): number {
+  if (!menu || menu.entries.length === 0) return 0;
+  const shown = Math.min(menu.entries.length, MENU_MAX_ENTRIES);
+  const sections = new Set(menu.entries.slice(0, shown).map((e) => e.kind)).size;
+  return shown + sections;
+}
+
+/** Slash completion, sectioned like the app: commands, then skills. */
+function SlashMenu(props: { menu: NonNullable<ThreadPaneProps["menu"]>; width: number }) {
+  const shown = props.menu.entries.slice(0, MENU_MAX_ENTRIES);
+  const nameWidth = Math.max(12, Math.floor(props.width * 0.4));
+  const descWidth = Math.max(0, props.width - nameWidth - 5);
+  let section: string | null = null;
+
+  return (
+    <Box flexDirection="column">
+      {shown.map((entry, index) => {
+        const header = entry.kind !== section ? (section = entry.kind) : null;
+        const selected = index === props.menu.selected;
+        return (
+          <Box flexDirection="column" key={`${entry.kind}:${entry.name}`}>
+            {header && <Text dimColor>{header === "command" ? "Commands" : "Skills"}</Text>}
+            <Text wrap="truncate" inverse={selected}>
+              {entry.kind === "command" ? " > " : " ~ "}
+              {entry.name.slice(0, nameWidth).padEnd(nameWidth)}
+              <Text dimColor={!selected}> {entry.description.slice(0, descWidth)}</Text>
+            </Text>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
 /** One composer row with the cursor drawn as an inverse cell. Terminals hide the
  * real cursor in the alternate screen, so the block is the only position cue. */
 function CursorLine(props: { text: string; column: number; focused: boolean }) {
@@ -190,7 +231,10 @@ function CursorLine(props: { text: string; column: number; focused: boolean }) {
 export function ThreadPane(props: ThreadPaneProps) {
   const thread = props.thread;
   const active = thread.status === "active" || thread.status === "starting";
-  const visibleCount = Math.max(3, props.height - 10);
+  // The pane has fixed geometry, so the menu takes its rows from the transcript
+  // rather than overlaying it.
+  const menuRows = menuHeight(props.menu);
+  const visibleCount = Math.max(3, props.height - 10 - menuRows);
   const scrollable = Math.max(0, props.detailLines.length - visibleCount);
   const clamped = Math.min(props.scrollUp, scrollable);
   const from = Math.max(0, props.detailLines.length - visibleCount - clamped);
@@ -237,6 +281,7 @@ export function ThreadPane(props: ThreadPaneProps) {
         {props.thread.hasPendingInteraction ? " · " : ""}
         {props.thread.hasPendingInteraction ? <Text color="yellow">needs you</Text> : ""}
       </Text>
+      {props.menu && menuRows > 0 && <SlashMenu menu={props.menu} width={props.width - 4} />}
       <Box
         flexDirection="column"
         height={6}

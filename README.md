@@ -20,12 +20,8 @@ A terminal UI around the bb ecosystem. **Phase 1 spike complete** — see
   branch/machine column (live activity while a thread runs); composer context
   line (project · machine · branch · provider · turn elapsed); per-thread
   cursors; archived threads excluded; discovery cached; status refreshes
-  event-gated.
+  event-gated. See [Keys](#keys).
   Set `BB_TUI_DEBUG=1` to append buffer counters to the context line.
-  `ctrl-l` forces a full repaint, and a resize repaints rather than diffing.
-  Composer editing is readline-style (`ctrl-a/e`, `ctrl-b/f`, `ctrl-u/k/w`,
-  arrows); `enter` sends, `shift-enter` or `ctrl-o` inserts a newline, and
-  actions are `ctrl-x` stop, `ctrl-r` reasoning, `ctrl-t` compact, `ctrl-p` model.
 - ⏭ Next: Phase 3 — terminals panes, queue UX, bundled single-file client.
 
 ## Pi provider note
@@ -55,6 +51,53 @@ npx tsx src/index.tsx              # interactive TUI
 
 Requires a bb server on loopback (the bb app or `bb` daemon). Discovery:
 `bb tui info` → `~/.bb/bb-app-runtime.json` → `BB_TUI_SERVER_URL` override.
+
+## Keys
+
+The client is modal. In the thread list there is no text entry, so plain letters
+are actions. In the composer every printable key belongs to the message, so
+actions there are ctrl chords.
+
+### Thread list
+
+| Key | Action |
+|---|---|
+| `↑` `↓` | move selection |
+| `←` `→` | fold / unfold a project (`←` on a thread jumps to its header) |
+| `enter` | open a thread, or fold the project it lands on |
+| `/` | filter by thread or project title (`esc` clears) |
+| `n` | new thread |
+| `tab` | focus the composer |
+| `esc` | back to the list from an open thread |
+| `q` | quit |
+
+### Composer
+
+| Key | Action |
+|---|---|
+| `enter` | send |
+| `shift-enter`, `ctrl-o` | newline (see the terminal note below) |
+| `ctrl-a` `ctrl-e` | start / end of input |
+| `ctrl-b` `ctrl-f`, `←` `→` | move the cursor |
+| `ctrl-w` | delete the word before the cursor |
+| `ctrl-u` `ctrl-k` | kill to start / to end |
+| `↑` `↓`, `pgup` `pgdn` | scroll the transcript |
+| `ctrl-x` | stop the thread |
+| `ctrl-r` | toggle reasoning deltas |
+| `ctrl-t` | compact |
+| `ctrl-p` | pick a model |
+| `tab`, `esc` | back to the list |
+
+`q` is an ordinary character here — use `esc` then `q` to quit. Two actions lose
+their mnemonic to the terminal rather than to preference: `ctrl-m` is Enter, and
+`ctrl-k` is kill-line, so compact and model take `ctrl-t` and `ctrl-p`.
+
+### Anywhere
+
+| Key | Action |
+|---|---|
+| `ctrl-l` | force a full repaint |
+| `ctrl-c` | exit |
 
 ## Responsive layout and terminal compatibility
 

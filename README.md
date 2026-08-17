@@ -9,10 +9,11 @@ A terminal UI around the bb ecosystem. **Phase 1 spike complete** — see
   (`getClientInfo` / `listThreads` / `getTimeline` / `eventsSince` with per-thread
   filter), CLI discovery (`bb tui info`), event buffer service (SQLite,
   realtime-driven), prefs (`bb plugin config bb-tui set hideReasoning|pollMs …`).
-- ✅ Client (Ink, Phase 2): thread list, detail view with streaming transcript
-  (buffered deltas per item), reasoning suppression (default on, `r` toggles),
-  actions (`x` stop / `c` compact / `m` model), spawn (pi/opencode-go by
-  default), per-thread persisted cursors; headless `info|list|watch`.
+- ✅ Client (Ink, Phase 2+): app-style split layout — left list (Needs
+  attention / Recent, content markers, colored status dots), right thread pane
+  (header, streaming transcript, composer); `tab` switches focus; word wrap;
+  actions (`x` stop / `c` compact / `m` model); per-thread cursors; archived
+  threads excluded; discovery cached; status refreshes event-gated.
 - ⏭ Next: Phase 3 — terminals panes, queue UX, bundled single-file client.
 
 ## Pi provider note

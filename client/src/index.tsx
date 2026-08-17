@@ -1,8 +1,8 @@
-// bb-tui — Ink frontend. Phase 2: streaming transcript of buffered deltas,
-// reasoning suppression (default on, `r` toggles), thread actions (x stop /
-// c compact / m model), fixed-position input, word-wrapped history + input,
-// user messages assembled from buffered turn requests, live status sync,
-// recency-sorted thread list (pinned first, then updated desc).
+// bb-tui — Ink frontend matching the bb app layout: left sidebar (Needs
+// attention / Recent sections) + right thread pane (header, timeline,
+// composer). Tab switches focus between list and composer. Performance:
+// discovery is cached, status refreshes fire only on status-relevant events,
+// and timeline refreshes are throttled to the open thread.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
@@ -30,23 +30,21 @@ import {
 } from "./api.js";
 
 type View =
-  | { kind: "list" }
+  | { kind: "home" }
   | { kind: "detail"; thread: ThreadRow }
   | { kind: "spawn" }
   | { kind: "model"; thread: ThreadRow };
 
 const MAX_TAIL = 600;
 const MAX_TRANSCRIPT_CHARS = 600;
-const LIST_WINDOW = 24;
-const DETAIL_CHROME = 10; // fixed rows: header, meta, border, status, input(3), hint
+const DETAIL_CHROME = 9; // header, border, meta, composer(3), hint
 const MAX_INPUT_ROWS = 3;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
 
-/** Apply an input chunk to the prompt: erase bytes pop, printable chars append,
- * remaining control bytes dropped. Handles terminals that batch keystrokes
- * (e.g. `\x7f\x08` together) and Ink's inconsistent backspace/delete mapping
- * across PTY modes. */
+/** Apply an input chunk: erase bytes pop, printable chars append, control
+ * dropped. Handles batched keystrokes and Ink's inconsistent backspace/delete
+ * mapping across PTY modes. */
 function transformInput(prev: string, data: string): string {
   let s = prev;
   for (const ch of data) {
@@ -56,8 +54,7 @@ function transformInput(prev: string, data: string): string {
   return s;
 }
 
-/** Word-wrap a single line to width; returns display rows (continuation lines
- * are indented two spaces so wrapped blocks stay visually distinct). */
+/** Word-wrap a line to width (continuation lines indented two spaces). */
 function wrapToWidth(text: string, width: number): string[] {
   const w = Math.max(8, width);
   const words = text.split(/\s+/).filter(Boolean);
@@ -65,18 +62,36 @@ function wrapToWidth(text: string, width: number): string[] {
   let line = "";
   for (const word of words) {
     const candidate = line === "" ? word : `${line} ${word}`;
-    if (candidate.length <= w || line === "") {
-      line = candidate;
-    } else {
+    if (candidate.length <= w || line === "") line = candidate;
+    else {
       out.push(line);
       line = word;
     }
   }
   if (line !== "") out.push(line);
   if (out.length === 0) out.push("");
-  // second+ lines get a continuation indent (applied for display)
   return out;
 }
+
+const STATUS_STYLE: Record<string, { glyph: string; color: string }> = {
+  active: { glyph: "●", color: "green" },
+  starting: { glyph: "◐", color: "yellow" },
+  stopping: { glyph: "◌", color: "yellow" },
+  error: { glyph: "✗", color: "red" },
+  idle: { glyph: "○", color: "gray" },
+};
+
+// Event types that change a thread's status row (everything else is content).
+const STATUS_EVENTS = new Set([
+  "thread/started",
+  "turn/started",
+  "turn/completed",
+  "client/thread/start",
+  "provider/error",
+  "thread/identity",
+  "thread/compacted",
+  "thread/context/cleared",
+]);
 
 export default function App() {
   const { exit } = useApp();
@@ -90,14 +105,15 @@ export default function App() {
   const [spawnProject, setSpawnProject] = useState<string | undefined>(undefined);
   const [threads, setThreads] = useState<ThreadRow[]>([]);
   const [sel, setSel] = useState(0);
-  const [view, setView] = useState<View>({ kind: "list" });
+  const [view, setView] = useState<View>({ kind: "home" });
+  const [focus, setFocus] = useState<"list" | "detail">("list");
   const [tail, setTail] = useState<BufferedEvent[]>([]);
   const [timeline, setTimeline] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting…");
   const [hideReasoning, setHideReasoning] = useState(true);
-  const [scrollUp, setScrollUp] = useState(0); // display rows scrolled off bottom
+  const [scrollUp, setScrollUp] = useState(0);
   const [modelHints, setModelHints] = useState<string[]>([]);
 
   const cursorRef = useRef(0);
@@ -106,16 +122,17 @@ export default function App() {
   const tailRef = useRef<BufferedEvent[]>([]);
   const transcriptsRef = useRef(new Map<string, string>());
   const reasoningRef = useRef(new Map<string, string>());
-  const userMsgsRef = useRef(new Map<string, string[]>()); // optimistic "U: …" (deduped vs timeline at render)
-  const localGraceRef = useRef(new Map<string, number>()); // locally spawned ids -> addedAt (drop grace)
+  const userMsgsRef = useRef(new Map<string, string[]>()); // optimistic, deduped vs timeline
+  const localGraceRef = useRef(new Map<string, number>());
   const lastTimelineRefreshRef = useRef(0);
+  const lastStatusRefreshRef = useRef(0);
   const pollMsRef = useRef(800);
-  const viewRef = useRef<View>({ kind: "list" });
-  const threadsRef = useRef<ThreadRow[]>([]);
+  const viewRef = useRef<View>({ kind: "home" });
+  const focusRef = useRef<"list" | "detail">("list");
   useEffect(() => void (viewRef.current = view), [view]);
-  useEffect(() => void (threadsRef.current = threads), [threads]);
+  useEffect(() => void (focusRef.current = focus), [focus]);
 
-  // Bootstrap: discover, projects, threads (pinned first, then updated desc).
+  // Bootstrap.
   useEffect(() => {
     (async () => {
       try {
@@ -149,8 +166,7 @@ export default function App() {
     });
   }
 
-  // Event poll loop: global stream for list markers + per-thread stream for
-  // the open detail view. Dedupe by seq; persist per-stream cursors.
+  // Poll loop: global stream (list markers) + per-thread stream (open detail).
   useEffect(() => {
     const t = setInterval(async () => {
       if (!info) return;
@@ -181,16 +197,17 @@ export default function App() {
           tailRef.current = next;
           setTail(next);
           assembleTranscripts(fresh);
-          refreshThreadStatuses();
+          // Status row refreshes only on status-relevant events, throttled.
+          const hasStatus = fresh.some((e) => STATUS_EVENTS.has(e.type));
+          if (hasStatus && Date.now() - lastStatusRefreshRef.current > 2000) {
+            lastStatusRefreshRef.current = Date.now();
+            refreshThreadStatuses();
+          }
         }
-        // Throttled timeline refresh for the open thread: keeps server order
-        // authoritative for user messages (buffer deltas only carry agent text).
+        // Throttled timeline refresh for the open thread (server-authoritative
+        // user messages and ordering).
         const now = Date.now();
-        if (
-          focusId &&
-          now - lastTimelineRefreshRef.current > 4000 &&
-          info
-        ) {
+        if (focusId && now - lastTimelineRefreshRef.current > 4000) {
           lastTimelineRefreshRef.current = now;
           try {
             const { items } = await getTimeline(info, focusId);
@@ -220,15 +237,8 @@ export default function App() {
     }
   }
 
-  // User messages: the server timeline is authoritative, so buffered turn
-  // requests are not added to history. `userMsgsRef` holds only optimistic
-  // entries (sent from this client) and is deduped against the timeline at
-  // render time.
-
-  // Merge fresh statuses in place. The server list is authoritative for
-  // removal: rows absent from a fresh fetch are dropped (archived or scrolled
-  // out of the window), except locally spawned rows within a short grace
-  // period (spawned threads may not appear in the list yet).
+  // Server list is authoritative for removal; locally spawned rows get a grace
+  // window (spawned threads may not appear in the list yet).
   function mergeThreads(rows: ThreadRow[]) {
     setThreads((prev) => {
       const fresh = new Map(rows.map((r) => [r.id, r]));
@@ -251,7 +261,6 @@ export default function App() {
         } else {
           const added = localGraceRef.current.get(t.id);
           if (added !== undefined && now - added < 15_000) out.push(t);
-          // otherwise: absent from server → drop (archived / out of window)
         }
       }
       for (const r of fresh.values()) {
@@ -269,15 +278,15 @@ export default function App() {
 
   function refreshThreadStatuses() {
     void discover()
-      .then((i) => listThreads(i))
+      .then((i) => listThreads(i, undefined, 200))
       .then(({ threads }) => mergeThreads(threads))
       .catch(() => {});
   }
 
   async function openThread(t: ThreadRow) {
-    const active = t.status === "active" || t.status === "starting";
-    const snapshot: ThreadRow = { ...t, status: t.status }; // sync happens via mergeThreads
+    const snapshot: ThreadRow = { ...t };
     setView({ kind: "detail", thread: snapshot });
+    setFocus("detail");
     setTimeline([]);
     setInput("");
     setScrollUp(0);
@@ -287,16 +296,31 @@ export default function App() {
       setTimeline(items.flatMap((i) => timelineLines(i)).slice(-120));
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
       assembleTranscripts(evs);
-      setStatus(`${t.providerId} · ${t.status} · ${t.id}${active ? " ●" : ""}`);
+      setStatus(`${t.providerId} · ${t.status}`);
     } catch (err) {
       setStatus(`timeline error: ${String(err)}`);
     }
   }
 
-  async function send(message: string) {
-    if (view.kind !== "detail" || !message.trim()) return;
+  function backToHome() {
+    setView({ kind: "home" });
+    setFocus("list");
+    setInput("");
+    refreshThreadStatuses();
+  }
+
+  function appendUserMsg(threadId: string, text: string) {
+    const list = userMsgsRef.current.get(threadId) ?? [];
+    const line = `U: ${text}`;
+    if (list[list.length - 1] !== line) {
+      userMsgsRef.current.set(threadId, [...list.slice(-60), line]);
+    }
+  }
+
+  async function send() {
+    if (view.kind !== "detail" || !input.trim()) return;
     const tid = view.thread.id;
-    const text = message.trim();
+    const text = input.trim();
     setInput("");
     setScrollUp(0);
     appendUserMsg(tid, text);
@@ -307,14 +331,6 @@ export default function App() {
       refreshThreadStatuses();
     } catch (err) {
       setStatus(`tell error: ${String(err)}`);
-    }
-  }
-
-  function appendUserMsg(threadId: string, text: string) {
-    const list = userMsgsRef.current.get(threadId) ?? [];
-    const line = `U: ${text}`;
-    if (list[list.length - 1] !== line) {
-      userMsgsRef.current.set(threadId, [...list.slice(-60), line]);
     }
   }
 
@@ -341,6 +357,7 @@ export default function App() {
       appendUserMsg(t.id, text);
       mergeThreads([t]);
       setView({ kind: "detail", thread: t });
+      setFocus("detail");
       await openThread(t);
     } catch (err) {
       setStatus(`spawn error: ${String(err)}`);
@@ -358,6 +375,7 @@ export default function App() {
       setStatus(`model error: ${String(err)}`);
     }
     setView({ kind: "detail", thread: t });
+    setFocus("detail");
   }
 
   async function pickModel(t: ThreadRow) {
@@ -374,17 +392,13 @@ export default function App() {
     }
   }
 
-  const backToList = () => {
-    setView({ kind: "list" });
-    refreshThreadStatuses();
-  };
-
+  // ---- keyboard ----
   useInput((data, key) => {
     if (key.ctrl && data === "c") return exit();
 
     if (view.kind === "spawn") {
       if (key.return) void doSpawn(input, true);
-      else if (key.escape || data === "q") setView({ kind: "list" });
+      else if (key.escape || data === "q") setView({ kind: "home" });
       else if (input === "" && data === "t") {
         const order = projectOrder;
         if (order.length > 0) {
@@ -400,12 +414,26 @@ export default function App() {
       else if (key.escape || data === "q") {
         const t = view.thread;
         setView({ kind: "detail", thread: t });
+        setFocus("detail");
       } else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
       return;
     }
     if (view.kind === "detail") {
-      if (key.return) void send(input);
-      else if (key.escape || data === "q") backToList();
+      if (focus === "list") {
+        if (key.upArrow) setSel((s) => Math.max(0, s - 1));
+        else if (key.downArrow) setSel((s) => Math.min(threads.length - 1, s + 1));
+        else if (key.return && threads[sel]) void openThread(threads[sel]!);
+        else if (data === "n") {
+          setView({ kind: "spawn" });
+          setInput("");
+        } else if (key.tab) setFocus("detail");
+        else if (key.escape || data === "q") backToHome();
+        return;
+      }
+      // composer focus
+      if (key.return) void send();
+      else if (key.escape || data === "q") setFocus("list");
+      else if (key.tab) setFocus("list");
       else if (key.upArrow) setScrollUp((s) => s + 1);
       else if (key.downArrow) setScrollUp((s) => Math.max(0, s - 1));
       else if (input === "" && data === "r") {
@@ -425,7 +453,7 @@ export default function App() {
       } else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
       return;
     }
-    // list view
+    // home view (no detail open)
     if (key.upArrow) setSel((s) => Math.max(0, s - 1));
     else if (key.downArrow) setSel((s) => Math.min(threads.length - 1, s + 1));
     else if (key.return && threads[sel]) void openThread(threads[sel]!);
@@ -435,23 +463,21 @@ export default function App() {
     }
   });
 
+  // ---- derived ----
   const focusedEvents = useMemo(
     () => (view.kind === "detail" ? tail.filter((e) => e.threadId === view.thread.id) : []),
     [tail, view],
   );
 
-  // Agent transcript lines (raw, unwrapped) + user messages for the thread.
   const conversation = useMemo(() => {
-    if (view.kind !== "detail") return { lines: [], live: 0 };
+    if (view.kind !== "detail") return { lines: [] as string[], live: 0 };
     const prefix = `${view.thread.id}::`;
     const agent = [...transcriptsRef.current.entries()]
       .filter(([k, text]) => k.startsWith(prefix) && text.length > 0)
       .map(([, text]) => `A: ${text.replace(/\n/g, " ").trim()}`);
     if (!hideReasoning) {
       for (const [k, text] of reasoningRef.current.entries()) {
-        if (k.startsWith(prefix) && text.length > 0) {
-          agent.push(`💭 ${text.replace(/\n/g, " ").trim()}`);
-        }
+        if (k.startsWith(prefix) && text.length > 0) agent.push(`💭 ${text.replace(/\n/g, " ").trim()}`);
       }
     }
     const users = (userMsgsRef.current.get(view.thread.id) ?? []).filter((l) => !timeline.includes(l));
@@ -469,20 +495,41 @@ export default function App() {
     return m;
   }, [tail]);
 
-  // Word-wrap everything to the inner width once, per render.
+  const needsAttention = useMemo(
+    () => threads.filter((t) => t.status === "error" || t.status === "active" || t.status === "starting"),
+    [threads],
+  );
+  const recent = useMemo(() => threads.filter((t) => !needsAttention.includes(t)), [threads, needsAttention]);
+
   const innerW = Math.max(20, cols - 6);
-  const displayLines = useMemo(
+  const inputRows = useMemo(() => {
+    if (!input) return [""];
+    return wrapToWidth(input, innerW).slice(-MAX_INPUT_ROWS);
+  }, [input, innerW]);
+
+  const detailLines = useMemo(
     () => (view.kind === "detail" ? conversation.lines.flatMap((l) => wrapToWidth(l, innerW)) : []),
     [conversation, innerW, view],
   );
 
-  const inputRows = useMemo(() => {
-    if (!input) return [""];
-    const lines = wrapToWidth(input, innerW);
-    return lines.slice(-Math.max(0, MAX_INPUT_ROWS));
-  }, [input, innerW]);
+  // ---- render helpers ----
+  const renderThreadRow = (t: ThreadRow, selected: boolean, marker: string | undefined, width: number) => {
+    const st = STATUS_STYLE[t.status] ?? STATUS_STYLE.idle!;
+    const title = (t.title ?? t.titleFallback ?? t.id).slice(0, Math.max(20, width - 22));
+    return (
+      <Text key={t.id} color={selected ? "green" : undefined} wrap="truncate">
+        {selected ? "› " : "  "}
+        <Text color={st.color}>{st.glyph}</Text> {t.providerId.padEnd(8).slice(0, 8)} {title}
+        {marker && (
+          <Text dimColor>
+            {" "}⟶ {marker.slice(0, Math.max(10, width - 34))}
+          </Text>
+        )}
+      </Text>
+    );
+  };
 
-  // ---- rendering -------------------------------------------------------
+  // ---- rendering ----
   if (error) {
     return (
       <Box flexDirection="column">
@@ -528,95 +575,129 @@ export default function App() {
     );
   }
 
-  if (view.kind === "detail") {
-    const t = view.thread;
-    const active = t.status === "active" || t.status === "starting";
-    const visibleCount = Math.max(3, rows - DETAIL_CHROME);
-    const scrollable = Math.max(0, displayLines.length - visibleCount);
-    const clamped = Math.min(scrollUp, scrollable);
-    const from = Math.max(0, displayLines.length - visibleCount - clamped);
-    const visible = displayLines.slice(from, from + visibleCount);
-    return (
-      <Box flexDirection="column">
-        <Text wrap="truncate">
-          <Text color="cyan" bold>
-            {(t.title ?? t.titleFallback ?? t.id).slice(0, 80)}
-          </Text>
-          <Text dimColor>
-            {"  "}
-            {projects.get(t.projectId) ?? t.projectId} · {t.providerId} · {t.status}
-            {active ? " ●" : ""}
-          </Text>
-        </Text>
-        <Box flexDirection="column" borderStyle="round" height={visibleCount + 2}>
-          {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
-          {visible.map((line, i) => (
-            <Text key={`${from + i}`} wrap="truncate">
-              {line.startsWith("U: ") ? <Text color="blue">{line}</Text> : line.startsWith("A: ") ? <Text color="green">{line}</Text> : line}
-            </Text>
-          ))}
-        </Box>
-        <Text dimColor wrap="truncate">
-          {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`} · history {timeline.length} · live {conversation.live} · seq{" "}
-          {cursorRef.current}
-        </Text>
-        {inputRows.map((l, i) => (
-          <Text key={i} wrap="truncate">
-            {i === inputRows.length - 1 ? `> ` : `  `}
-            <Text color={active ? "green" : "white"}>{l === "" ? " " : l}</Text>
-          </Text>
-        ))}
-        <Text dimColor wrap="truncate">
-          enter=tell ↑↓=scroll r=reasoning({hideReasoning ? "off" : "on"}) x=stop c=compact m=model esc/q=list ctrl+c=quit ·{" "}
-          {status}
-        </Text>
-      </Box>
-    );
-  }
-
-  // list view
+  const leftW = Math.max(34, Math.floor(cols * 0.4));
+  const rightW = cols - leftW - 2;
   const firstVisible = Math.max(0, sel - 4);
-  const visibleThreads = threads.slice(firstVisible, firstVisible + LIST_WINDOW);
-  const statusStyle = (s: string): { glyph: string; color: string } =>
-    s === "active"
-      ? { glyph: "●", color: "green" }
-      : s === "starting"
-        ? { glyph: "◐", color: "yellow" }
-        : s === "stopping"
-          ? { glyph: "◌", color: "yellow" }
-          : s === "error"
-            ? { glyph: "✗", color: "red" }
-            : { glyph: "○", color: "gray" };
+  const visibleSel = Math.max(0, sel - firstVisible);
+
   return (
     <Box flexDirection="column">
-      <Text color="cyan" bold>
-        bb-tui
+      {/* top bar */}
+      <Text wrap="truncate">
+        <Text color="cyan" bold>
+          bb-tui
+        </Text>
+        <Text dimColor>
+          {" "}· {status} · {projects.size} projects · {threads.length} threads · tab=focus
+        </Text>
       </Text>
-      <Text dimColor wrap="truncate">
-        {status} · {projects.size} projects · {threads.length} threads
-      </Text>
-      {threads.length === 0 && <Text dimColor>no threads (or plugin not installed)</Text>}
-      {visibleThreads.map((t, i) => {
-        const abs = firstVisible + i;
-        const marker = byThread.get(t.id);
-        const st = statusStyle(t.status);
-        return (
-          <Text key={t.id} color={abs === sel ? "green" : undefined} wrap="truncate">
-            {abs === sel ? "> " : "  "}
-            <Text color={st.color}>{st.glyph}</Text> {t.providerId.padEnd(10)}{" "}
-            {(t.title ?? t.titleFallback ?? t.id).slice(0, 56)}
-            {marker && (
-              <Text dimColor>
-                {" "}⟶ {marker.slice(0, 46)}
-              </Text>
-            )}
+
+      <Box flexDirection="row" height={rows - 3}>
+        {/* left: thread list */}
+        <Box flexDirection="column" width={leftW} borderStyle="round">
+          <Text dimColor wrap="truncate">
+            {needsAttention.length > 0 ? "NEEDS ATTENTION" : ""}
           </Text>
-        );
-      })}
-      <Text dimColor wrap="truncate">
-        ↑/↓ select · enter open · n new thread · ctrl+c quit
-      </Text>
+          {needsAttention.length === 0 && recent.length === 0 && <Text dimColor>no threads</Text>}
+          {needsAttention.map((t, i) => renderThreadRow(t, i === visibleSel && sel === firstVisible + i, byThread.get(t.id), leftW - 4))}
+          {needsAttention.length > 0 && <Text dimColor>── recent ──</Text>}
+          {recent.slice(0, Math.max(4, rows - 16)).map((t, i) =>
+            renderThreadRow(t, false, byThread.get(t.id), leftW - 4),
+          )}
+          <Text dimColor wrap="truncate">
+            ↑/↓ select · enter open · n new · esc/q home
+          </Text>
+        </Box>
+
+        {/* right: thread pane */}
+        <Box flexDirection="column" width={rightW} borderStyle="round">
+          {view.kind === "detail" ? (
+            <ThreadPane
+              view={view}
+              projects={projects}
+              timeline={timeline}
+              conversation={conversation}
+              detailLines={detailLines}
+              scrollUp={scrollUp}
+              input={input}
+              inputRows={inputRows}
+              status={status}
+              focus={focus}
+              rows={rows}
+              hideReasoning={hideReasoning}
+              cursorSeq={cursorRef.current}
+            />
+          ) : (
+            <Box flexDirection="column">
+              <Text dimColor>select a thread (↑/↓, enter) or press n for a new thread</Text>
+              <Text dimColor wrap="truncate">
+                tab switches focus to the composer once a thread is open
+              </Text>
+            </Box>
+          )}
+        </Box>
+      </Box>
     </Box>
+  );
+}
+
+function ThreadPane(props: {
+  view: Extract<View, { kind: "detail" }>;
+  projects: Map<string, string>;
+  timeline: string[];
+  conversation: { lines: string[]; live: number };
+  detailLines: string[];
+  scrollUp: number;
+  input: string;
+  inputRows: string[];
+  status: string;
+  focus: "list" | "detail";
+  rows: number;
+  hideReasoning: boolean;
+  cursorSeq: number;
+}) {
+  const t = props.view.thread;
+  const active = t.status === "active" || t.status === "starting";
+  const visibleCount = Math.max(3, props.rows - DETAIL_CHROME);
+  const scrollable = Math.max(0, props.detailLines.length - visibleCount);
+  const clamped = Math.min(props.scrollUp, scrollable);
+  const from = Math.max(0, props.detailLines.length - visibleCount - clamped);
+  const visible = props.detailLines.slice(from, from + visibleCount);
+  return (
+    <>
+      <Text wrap="truncate">
+        <Text color="cyan" bold>
+          {(t.title ?? t.titleFallback ?? t.id).slice(0, 60)}
+        </Text>
+        <Text dimColor>
+          {" "}
+          {props.projects.get(t.projectId) ?? t.projectId} · {t.providerId} · {t.status}
+          {active ? " ●" : ""}
+        </Text>
+      </Text>
+      <Box flexDirection="column" height={visibleCount} marginTop={0}>
+        {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
+        {visible.map((line, i) => (
+          <Text key={`${from + i}`} wrap="truncate">
+            {line.startsWith("U: ") ? <Text color="blue">{line}</Text> : line.startsWith("A: ") ? <Text color="green">{line}</Text> : <Text dimColor={line.startsWith("—") || line.startsWith("💭")}>{line}</Text>}
+          </Text>
+        ))}
+      </Box>
+      <Text dimColor wrap="truncate">
+        {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`} · history {props.timeline.length} · live {props.conversation.live} · seq{" "}
+        {props.cursorSeq}
+      </Text>
+      {props.inputRows.map((l, i) => (
+        <Text key={i} wrap="truncate">
+          {i === props.inputRows.length - 1 ? `> ` : `  `}
+          <Text color={active ? "green" : "white"}>{l === "" ? " " : l}</Text>
+        </Text>
+      ))}
+      <Text dimColor wrap="truncate">
+        {props.focus === "detail" ? "▶ composer " : "tab → composer "}
+        enter=tell ↑↓=scroll r/x/c/m esc/q=home · {props.status}
+      </Text>
+    </>
   );
 }
 

@@ -71,7 +71,20 @@ export interface EventsPage {
  *   2. `bb tui info` — plugin CLI command (authoritative when the plugin is installed)
  *   3. ~/.bb/bb-app-runtime.json — pre-install fallback
  */
+// Cache discovery: the poll loop calls discover() every tick, and each call
+// spawns a `bb tui info` subprocess (~300ms). Refresh at most once a minute.
+let discoverCache: { info: ClientInfo; at: number } | null = null;
+
 export async function discover(): Promise<ClientInfo> {
+  if (discoverCache && Date.now() - discoverCache.at < 60_000) {
+    return discoverCache.info;
+  }
+  const info = await discoverFresh();
+  discoverCache = { info, at: Date.now() };
+  return info;
+}
+
+async function discoverFresh(): Promise<ClientInfo> {
   const env = process.env.BB_TUI_SERVER_URL;
   if (env) {
     return {

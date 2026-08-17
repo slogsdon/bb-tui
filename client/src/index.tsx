@@ -471,9 +471,15 @@ export default function App() {
     const prefix = `${view.thread.id}::`;
     // Newlines are load-bearing: they carry the markdown block structure the
     // renderer needs. Only trim the edges.
+    // The server timeline is authoritative. Once a streamed message lands there,
+    // the locally assembled copy is a stale duplicate of the same text (and a
+    // truncated one while the turn is still arriving), so drop it.
+    const settled = timeline.filter((b) => b.role === "agent").map((b) => b.text);
     const agent: TranscriptBlock[] = [...transcriptsRef.current.entries()]
       .filter(([k, text]) => k.startsWith(prefix) && text.trim().length > 0)
-      .map(([, text]) => ({ role: "agent" as const, text: text.trim() }));
+      .map(([, text]) => text.trim())
+      .filter((text) => !settled.some((s) => s.includes(text)))
+      .map((text) => ({ role: "agent" as const, text }));
     if (!hideReasoning) {
       for (const [k, text] of reasoningRef.current.entries()) {
         if (k.startsWith(prefix) && text.trim().length > 0) {

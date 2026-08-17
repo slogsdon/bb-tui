@@ -123,8 +123,8 @@ export async function rpc<T>(serverUrl: string, method: string, input: unknown):
   return body.result;
 }
 
-export function listThreads(info: ClientInfo, projectId?: string): Promise<{ threads: ThreadRow[] }> {
-  return rpc(info.serverUrl, "listThreads", { projectId, limit: 100 });
+export function listThreads(info: ClientInfo, projectId?: string, limit = 100): Promise<{ threads: ThreadRow[] }> {
+  return rpc(info.serverUrl, "listThreads", { projectId, limit });
 }
 
 export function getTimeline(info: ClientInfo, threadId: string): Promise<{ items: unknown[] }> {
@@ -205,6 +205,43 @@ export function eventText(e: BufferedEvent): string {
     return JSON.stringify(p).slice(0, 160);
   } catch {
     return "";
+  }
+}
+
+/** Human-readable activity label for a buffered event, or null when the event
+ * carries no meaningful content (token/context-usage updates are suppressed —
+ * they are status noise, not activity). Used for thread-list markers. */
+export function eventActivityLabel(e: BufferedEvent): string | null {
+  const d = (e.payload as { data?: Record<string, unknown> } | undefined)?.data ?? {};
+  const delta = typeof d.delta === "string" ? d.delta.replace(/\s+/g, " ").trim() : "";
+  switch (e.type) {
+    case "item/agentMessage/delta":
+      return delta || null;
+    case "item/reasoning/textDelta":
+    case "item/reasoning/summaryTextDelta":
+      return delta ? `💭 ${delta}` : null;
+    case "item/commandExecution/outputDelta":
+      return delta ? `$ ${delta}` : null;
+    case "item/started":
+    case "item/completed": {
+      const it = d.item as { summary?: unknown; type?: unknown; name?: unknown } | undefined;
+      if (it && typeof it.summary === "string" && it.summary) return it.summary.slice(0, 80);
+      if (it && typeof it.type === "string") return it.type;
+      return null;
+    }
+    case "turn/started":
+      return "turn started";
+    case "thread/started":
+      return "started";
+    case "turn/completed":
+      return "done";
+    case "provider/error":
+      return String(d.error ?? d.message ?? "provider error");
+    case "thread/tokenUsage/updated":
+    case "thread/contextWindowUsage/updated":
+      return null; // status noise
+    default:
+      return null;
   }
 }
 

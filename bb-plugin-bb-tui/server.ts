@@ -245,8 +245,9 @@ export default async function plugin(bb: BbPluginApi) {
     async listThreads({ projectId, limit }) {
       const res = await bb.sdk.threads.list({
         projectId,
-        limit: limit ?? 100,
+        limit: limit ?? 200,
         includeHidden: false,
+        archived: false,
       });
       return { threads: res as unknown[] };
     },

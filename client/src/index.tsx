@@ -8,6 +8,7 @@ import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
   compactThread,
   discover,
+  eventActivityLabel,
   eventsSince,
   getTimeline,
   listProjects,
@@ -106,6 +107,7 @@ export default function App() {
   const transcriptsRef = useRef(new Map<string, string>());
   const reasoningRef = useRef(new Map<string, string>());
   const userMsgsRef = useRef(new Map<string, string[]>()); // optimistic "U: …" (deduped vs timeline at render)
+  const localGraceRef = useRef(new Map<string, number>()); // locally spawned ids -> addedAt (drop grace)
   const lastTimelineRefreshRef = useRef(0);
   const pollMsRef = useRef(800);
   const viewRef = useRef<View>({ kind: "list" });
@@ -129,8 +131,8 @@ export default function App() {
         setProjects(new Map(projs.map((p) => [p.id, p.name])));
         const personal = projs.find((p) => p.name === "Personal");
         setSpawnProject(personal?.id ?? order[0]);
-        const { threads } = await listThreads(info);
-        setThreads(sortThreads(threads));
+        const { threads } = await listThreads(info, undefined, 200);
+        setThreads(sortThreads(threads.filter((t) => !t.archivedAt)));
       } catch (err) {
         setError(String(err));
         setStatus("failed");
@@ -223,28 +225,45 @@ export default function App() {
   // entries (sent from this client) and is deduped against the timeline at
   // render time.
 
-  // Merge fresh statuses in place, sorting stays stable. If the open detail
-  // thread changed, sync its snapshot so the header reflects live state.
+  // Merge fresh statuses in place. The server list is authoritative for
+  // removal: rows absent from a fresh fetch are dropped (archived or scrolled
+  // out of the window), except locally spawned rows within a short grace
+  // period (spawned threads may not appear in the list yet).
   function mergeThreads(rows: ThreadRow[]) {
     setThreads((prev) => {
-      const byId = new Map(prev.map((t) => [t.id, t]));
+      const fresh = new Map(rows.map((r) => [r.id, r]));
+      const now = Date.now();
+      const out: ThreadRow[] = [];
       let changed: ThreadRow | undefined;
-      for (const r of rows) {
-        const old = byId.get(r.id);
-        if (old) {
-          const merged = { ...old, status: r.status, title: r.title ?? old.title };
-          byId.set(r.id, merged);
-          if (old.status !== r.status) changed = merged;
+      for (const t of prev) {
+        const f = fresh.get(t.id);
+        if (f) {
+          if (f.archivedAt) continue;
+          const merged = {
+            ...t,
+            status: f.status,
+            title: f.title ?? t.title,
+            updatedAt: f.updatedAt ?? t.updatedAt,
+          };
+          if (t.status !== f.status) changed = merged;
+          out.push(merged);
+          fresh.delete(t.id);
         } else {
-          byId.set(r.id, r);
+          const added = localGraceRef.current.get(t.id);
+          if (added !== undefined && now - added < 15_000) out.push(t);
+          // otherwise: absent from server → drop (archived / out of window)
         }
+      }
+      for (const r of fresh.values()) {
+        if (r.archivedAt) continue;
+        out.push(r);
       }
       if (changed && viewRef.current.kind === "detail" && changed.id === viewRef.current.thread.id) {
         const next = { ...viewRef.current, thread: changed };
         viewRef.current = next;
         setView(next);
       }
-      return [...byId.values()];
+      return out;
     });
   }
 
@@ -318,6 +337,7 @@ export default function App() {
         useGo ? "opencode-go/deepseek-v4-flash" : undefined,
       );
       const t = await threadShow(result.id);
+      localGraceRef.current.set(t.id, Date.now());
       appendUserMsg(t.id, text);
       mergeThreads([t]);
       setView({ kind: "detail", thread: t });
@@ -438,9 +458,14 @@ export default function App() {
     return { lines: [...timeline, ...users, ...agent], live: focusedEvents.length };
   }, [timeline, focusedEvents, hideReasoning, view]);
 
+  // Latest meaningful activity per thread (content, not raw event names).
   const byThread = useMemo(() => {
-    const m = new Map<string, BufferedEvent>();
-    for (const e of tail) m.set(e.threadId, e);
+    const m = new Map<string, string>();
+    for (const e of [...tail].reverse()) {
+      if (m.has(e.threadId)) continue;
+      const label = eventActivityLabel(e);
+      if (label) m.set(e.threadId, label);
+    }
     return m;
   }, [tail]);
 
@@ -552,6 +577,16 @@ export default function App() {
   // list view
   const firstVisible = Math.max(0, sel - 4);
   const visibleThreads = threads.slice(firstVisible, firstVisible + LIST_WINDOW);
+  const statusStyle = (s: string): { glyph: string; color: string } =>
+    s === "active"
+      ? { glyph: "●", color: "green" }
+      : s === "starting"
+        ? { glyph: "◐", color: "yellow" }
+        : s === "stopping"
+          ? { glyph: "◌", color: "yellow" }
+          : s === "error"
+            ? { glyph: "✗", color: "red" }
+            : { glyph: "○", color: "gray" };
   return (
     <Box flexDirection="column">
       <Text color="cyan" bold>
@@ -563,14 +598,18 @@ export default function App() {
       {threads.length === 0 && <Text dimColor>no threads (or plugin not installed)</Text>}
       {visibleThreads.map((t, i) => {
         const abs = firstVisible + i;
-        const last = byThread.get(t.id);
-        const marker = last ? ` ⟶ ${last.type}` : "";
+        const marker = byThread.get(t.id);
+        const st = statusStyle(t.status);
         return (
           <Text key={t.id} color={abs === sel ? "green" : undefined} wrap="truncate">
             {abs === sel ? "> " : "  "}
-            {t.status === "active" ? "●" : t.status === "idle" ? "○" : "✗"} {t.providerId.padEnd(10)}{" "}
-            {(t.title ?? t.titleFallback ?? t.id).slice(0, 60)}
-            <Text dimColor>{marker}</Text>
+            <Text color={st.color}>{st.glyph}</Text> {t.providerId.padEnd(10)}{" "}
+            {(t.title ?? t.titleFallback ?? t.id).slice(0, 56)}
+            {marker && (
+              <Text dimColor>
+                {" "}⟶ {marker.slice(0, 46)}
+              </Text>
+            )}
           </Text>
         );
       })}

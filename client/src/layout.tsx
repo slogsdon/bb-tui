@@ -56,14 +56,23 @@ export type ThreadListPaneProps = {
   height: number;
 };
 
+// A branch every thread shares distinguishes nothing; it just repeats down the
+// column and steals title width.
+const UNINFORMATIVE_BRANCHES = new Set(["main", "master", "trunk", "default"]);
+
 /** Stable per-thread metadata for the right-hand column: the branch it works on,
  * or the machine it runs on when the branch says nothing. Generated worktree
- * branches carry the thread id as a suffix — drop it, it is already the row. */
+ * branches carry the thread id as a suffix — drop it, it is already the row.
+ * Returns "" whenever the value would be the same for every row, because a
+ * column of identical values is worse than no column. */
 export function threadMeta(thread: ThreadRow, hostNames: Map<string, string>): string {
-  const branch = thread.environmentBranchName ?? "";
-  if (branch) return branch.replace(/-?thr_[a-z0-9]+$/i, "").replace(/^bb\//, "");
-  const host = thread.environmentHostId ?? "";
-  return hostNames.get(host) ?? "";
+  const branch = (thread.environmentBranchName ?? "")
+    .replace(/-?thr_[a-z0-9]+$/i, "")
+    .replace(/^bb\//, "");
+  if (branch && !UNINFORMATIVE_BRANCHES.has(branch)) return branch;
+  // With a single machine enrolled, naming it tells you nothing either.
+  if (hostNames.size > 1) return hostNames.get(thread.environmentHostId ?? "") ?? "";
+  return "";
 }
 
 /** Render the thread navigator: threads grouped under their project, without

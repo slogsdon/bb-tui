@@ -170,15 +170,28 @@ test("row metadata prefers the branch and strips generated worktree noise", () =
     threadMeta({ ...sampleThread, environmentBranchName: "bb/improve-thread-view-thr_kud5sfwmaq" }, hosts),
     "improve-thread-view",
   );
-  assert.equal(threadMeta({ ...sampleThread, environmentBranchName: "main" }, hosts), "main");
-  assert.equal(threadMeta({ ...sampleThread, environmentHostId: "host_1" }, hosts), "mac-mini");
   assert.equal(threadMeta(sampleThread, hosts), "");
+});
+
+test("row metadata stays empty when it would repeat on every row", () => {
+  const oneHost = new Map([["host_1", "mac-mini"]]);
+  const twoHosts = new Map([
+    ["host_1", "mac-mini"],
+    ["host_2", "cloud"],
+  ]);
+
+  // Default branches say nothing when almost every thread sits on one.
+  assert.equal(threadMeta({ ...sampleThread, environmentBranchName: "main" }, twoHosts), "");
+  assert.equal(threadMeta({ ...sampleThread, environmentBranchName: "master" }, twoHosts), "");
+  // One enrolled machine means naming it distinguishes nothing.
+  assert.equal(threadMeta({ ...sampleThread, environmentHostId: "host_1" }, oneHost), "");
+  assert.equal(threadMeta({ ...sampleThread, environmentHostId: "host_1" }, twoHosts), "mac-mini");
 });
 
 test("settled threads show metadata while running threads show live activity", () => {
   const idle = renderFrame(
     <ThreadListPane
-      rows={[{ kind: "thread", thread: { ...sampleThread, status: "idle", environmentBranchName: "main" } }]}
+      rows={[{ kind: "thread", thread: { ...sampleThread, status: "idle", environmentBranchName: "fix/scroll" } }]}
       selectedIndex={0}
       firstVisible={0}
       visibleCount={1}
@@ -190,7 +203,7 @@ test("settled threads show metadata while running threads show live activity", (
   );
   const running = renderFrame(
     <ThreadListPane
-      rows={[{ kind: "thread", thread: { ...sampleThread, environmentBranchName: "main" } }]}
+      rows={[{ kind: "thread", thread: { ...sampleThread, environmentBranchName: "fix/scroll" } }]}
       selectedIndex={0}
       firstVisible={0}
       visibleCount={1}
@@ -201,14 +214,14 @@ test("settled threads show metadata while running threads show live activity", (
     />,
   );
 
-  assert.match(idle, /main/);
+  assert.match(idle, /fix\/scroll/);
   assert.doesNotMatch(idle, /writing tests/);
   assert.match(running, /writing tests/);
 });
 
 test("the context row carries where the thread runs, not debug counters", () => {
   const parts = contextRow({
-    thread: { ...sampleThread, environmentHostId: "host_1", environmentBranchName: "main" },
+    thread: { ...sampleThread, environmentHostId: "host_1", environmentBranchName: "fix/pane-scroll" },
     projectName: "bb-tui",
     hostNames: new Map([["host_1", "mac-mini"]]),
     detailLines: [],
@@ -220,7 +233,13 @@ test("the context row carries where the thread runs, not debug counters", () => 
     height: 24,
   });
 
-  assert.deepEqual(parts, ["bb-tui", "mac-mini", "main", "codex", "working 18s · esc to interrupt"]);
+  assert.deepEqual(parts, [
+    "bb-tui",
+    "mac-mini",
+    "fix/pane-scroll",
+    "codex",
+    "working 18s · esc to interrupt",
+  ]);
   assert.ok(!parts.some((p) => p.includes("seq")));
 });
 

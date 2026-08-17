@@ -6,11 +6,21 @@ A terminal UI around the bb ecosystem. **Phase 1 spike complete** — see
 ## Status
 
 - ✅ Plugin backend (`bb-plugin-bb-tui`): installed on this host, RPC
-  (`getClientInfo` / `listThreads` / `getTimeline` / `eventsSince`), CLI
-  discovery (`bb tui info`), event buffer service (SQLite, realtime-driven).
-- ✅ Client (Ink): boots, discovers server, renders live thread list; headless
-  CLI (`bb-tui info|list|watch`).
-- ⏭ Next: Phase 2 — detail streaming view, terminals, provider/model picker.
+  (`getClientInfo` / `listThreads` / `getTimeline` / `eventsSince` with per-thread
+  filter), CLI discovery (`bb tui info`), event buffer service (SQLite,
+  realtime-driven), prefs (`bb plugin config bb-tui set hideReasoning|pollMs …`).
+- ✅ Client (Ink, Phase 2): thread list, detail view with streaming transcript
+  (buffered deltas per item), reasoning suppression (default on, `r` toggles),
+  actions (`x` stop / `c` compact / `m` model), spawn (pi/opencode-go by
+  default), per-thread persisted cursors; headless `info|list|watch`.
+- ⏭ Next: Phase 3 — terminals panes, queue UX, bundled single-file client.
+
+## Pi provider note
+
+bb's pi provider catalogs: `opencode/*` (zen) is billing-blocked on this host
+(CreditsError 401); `opencode-go/*` (zen/go) is your paid subscription —
+verified working. Use `opencode-go/deepseek-v4-flash` (cheapest), or
+`opencode-go/{minimax-m3,qwen3.7-plus}`.
 
 ## Run
 

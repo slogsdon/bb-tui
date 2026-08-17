@@ -1,11 +1,16 @@
 // bb-tui client API layer: discovery + plugin RPC + bb CLI wrappers.
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
+
+export interface ClientPrefs {
+  hideReasoning: boolean;
+  pollMs: number;
+}
 
 export interface ClientInfo {
   serverUrl: string;
@@ -13,6 +18,7 @@ export interface ClientInfo {
   version: string;
   pluginVersion: string;
   retentionDays: number;
+  prefs: ClientPrefs;
 }
 
 export interface ThreadRow {
@@ -37,7 +43,16 @@ export interface BufferedEvent {
     delta?: string;
     summary?: string;
     text?: string;
-    data?: { delta?: string; text?: string; summary?: string };
+    data?: {
+      delta?: string;
+      text?: string;
+      summary?: string;
+      itemId?: string;
+      turnId?: string;
+      model?: string;
+      error?: string;
+      message?: string;
+    };
     [k: string]: unknown;
   };
   ts: number;
@@ -57,7 +72,14 @@ export interface EventsPage {
 export async function discover(): Promise<ClientInfo> {
   const env = process.env.BB_TUI_SERVER_URL;
   if (env) {
-    return { serverUrl: env, dataDir: "unknown", version: "unknown", pluginVersion: "?", retentionDays: 0 };
+    return {
+      serverUrl: env,
+      dataDir: "unknown",
+      version: "unknown",
+      pluginVersion: "?",
+      retentionDays: 0,
+      prefs: { hideReasoning: true, pollMs: 800 },
+    };
   }
   try {
     const { stdout } = await execFileP("bb", ["tui", "info"], { timeout: 10_000 });
@@ -74,7 +96,14 @@ export async function discover(): Promise<ClientInfo> {
   if (!rt.serverUrl) {
     throw new Error("cannot discover bb server: set BB_TUI_SERVER_URL or install the bb-tui plugin");
   }
-  return { serverUrl: rt.serverUrl, dataDir, version: rt.version ?? "unknown", pluginVersion: "?", retentionDays: 0 };
+  return {
+    serverUrl: rt.serverUrl,
+    dataDir,
+    version: rt.version ?? "unknown",
+    pluginVersion: "?",
+    retentionDays: 0,
+    prefs: { hideReasoning: true, pollMs: 800 },
+  };
 }
 
 /** Call a bb-tui plugin RPC method over loopback HTTP. */
@@ -100,8 +129,8 @@ export function getTimeline(info: ClientInfo, threadId: string): Promise<{ items
   return rpc(info.serverUrl, "getTimeline", { threadId });
 }
 
-export function eventsSince(info: ClientInfo, afterSeq: number): Promise<EventsPage> {
-  return rpc(info.serverUrl, "eventsSince", { afterSeq, limit: 500 });
+export function eventsSince(info: ClientInfo, afterSeq: number, threadId?: string): Promise<EventsPage> {
+  return rpc(info.serverUrl, "eventsSince", { afterSeq, limit: 500, threadId });
 }
 
 export interface Project {
@@ -126,12 +155,31 @@ export interface SpawnResult {
   [k: string]: unknown;
 }
 
-export async function spawnThread(projectId: string, prompt: string): Promise<SpawnResult> {
-  return bbJson<SpawnResult>(["thread", "spawn", "--project", projectId, "--prompt", prompt]);
+export async function spawnThread(projectId: string, prompt: string, provider?: string, model?: string): Promise<SpawnResult> {
+  const args = ["thread", "spawn", "--project", projectId, "--prompt", prompt];
+  if (provider) args.push("--provider", provider);
+  if (model) args.push("--model", model);
+  return bbJson<SpawnResult>(args);
 }
 
 export function tellThread(threadId: string, message: string): Promise<unknown> {
   return bbJson(["thread", "tell", threadId, message]);
+}
+
+export function stopThread(threadId: string): Promise<unknown> {
+  return bbJson(["thread", "stop", threadId]);
+}
+
+export function compactThread(threadId: string): Promise<unknown> {
+  return bbJson(["thread", "compact", threadId]);
+}
+
+export function setThreadModel(threadId: string, model: string): Promise<unknown> {
+  return bbJson(["thread", "update", threadId, "--model", model]);
+}
+
+export function providerModels(providerId: string): Promise<Array<{ id: string; displayName?: string }>> {
+  return bbJson(["provider", "models", providerId]);
 }
 
 /** Extract display text from a buffered event row. */
@@ -142,6 +190,7 @@ export function eventText(e: BufferedEvent): string {
   if (typeof p.data?.text === "string") return p.data.text;
   if (typeof p.summary === "string") return p.summary;
   if (typeof p.data?.summary === "string") return p.data.summary;
+  if (typeof p.data?.message === "string") return p.data.message;
   try {
     return JSON.stringify(p).slice(0, 160);
   } catch {
@@ -172,4 +221,34 @@ export function timelineLines(row: unknown, acc: string[] = []): string[] {
   }
   for (const c of r.children ?? []) timelineLines(c, acc);
   return acc;
+}
+
+// ---- cursor persistence (per server) ----
+function cursorFile(): string {
+  return path.join(os.homedir(), ".local", "state", "bb-tui", "cursor.json");
+}
+
+export async function loadCursor(serverUrl: string, threadId?: string): Promise<number> {
+  try {
+    const raw = JSON.parse(await readFile(cursorFile(), "utf8")) as Record<string, number>;
+    return raw[key(serverUrl, threadId)] ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function saveCursor(serverUrl: string, seq: number, threadId?: string): Promise<void> {
+  try {
+    const file = cursorFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    const raw = JSON.parse(await readFile(file, "utf8").catch(() => "{}")) as Record<string, number>;
+    raw[key(serverUrl, threadId)] = seq;
+    await writeFile(file, JSON.stringify(raw));
+  } catch {
+    // non-fatal
+  }
+}
+
+function key(serverUrl: string, threadId?: string): string {
+  return threadId ? `${serverUrl}::${threadId}` : serverUrl;
 }

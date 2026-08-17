@@ -3,7 +3,7 @@
 //   bb-tui info                                      discovery facts
 //   bb-tui list [--project <id>]                     thread list (JSON lines)
 //   bb-tui watch --thread <id> [--from <seq>]        follow buffered events
-import { discover, eventText, eventsSince, listThreads, type ClientInfo, type ThreadRow } from "./api.js";
+import { discover, eventText, eventsSince, listThreads, loadCursor, saveCursor, type ClientInfo, type ThreadRow } from "./api.js";
 
 function fail(msg: string): never {
   console.error(`error: ${msg}`);
@@ -45,25 +45,28 @@ async function main() {
       const flags = parseArgs(rest, { thread: "", from: "" });
       if (!flags.thread) fail("watch requires --thread <id>");
       const info = await discover();
-      let cursor = Number.parseInt(flags.from ?? "0", 10) || 0;
+      let cursor = Number.parseInt(flags.from ?? "", 10);
+      cursor = Number.isFinite(cursor) && cursor > 0 ? cursor : await loadCursor(info.serverUrl, flags.thread);
+      const skipReasoning = flags["no-reasoning"] === "true";
       let got = 0;
       const started = Date.now();
       for (;;) {
         let page;
         try {
-          page = await eventsSince(info, cursor);
+          page = await eventsSince(info, cursor, flags.thread);
         } catch (err) {
           console.error(`poll error at cursor ${cursor}: ${String(err)}`);
           await sleep(2000);
           continue;
         }
         for (const e of page.events) {
-          if (flags.thread && e.threadId !== flags.thread) continue;
+          if (skipReasoning && e.type.startsWith("item/reasoning/")) continue;
           const text = eventText(e).replace(/\n/g, "\\n");
           console.log(`${e.seq}\t${e.threadId}\t${e.type}\t${text.slice(0, 120)}`);
           got++;
         }
         cursor = page.nextCursor;
+        await saveCursor(info.serverUrl, page.nextCursor, flags.thread);
         if (got > 0 && flags["once"] === "true") {
           console.log(`total ${got} events in ${Date.now() - started}ms`);
           return;

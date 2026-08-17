@@ -28,6 +28,10 @@ const rpcContract = defineRpcContract({
       version: z.string(),
       pluginVersion: z.string(),
       retentionDays: z.number(),
+      prefs: z.object({
+        hideReasoning: z.boolean(),
+        pollMs: z.number(),
+      }),
     }),
   },
   listThreads: {
@@ -48,6 +52,7 @@ const rpcContract = defineRpcContract({
       .object({
         afterSeq: z.number().int().nonnegative().optional(),
         limit: z.number().int().min(1).max(2000).optional(),
+        threadId: z.string().optional(),
       })
       .strict(),
     output: z.object({
@@ -70,9 +75,13 @@ export default async function plugin(bb: BbPluginApi) {
 
   const settings = bb.settings.define({
     retentionDays: { type: "string", label: "Event buffer retention (days)", default: "7" },
+    hideReasoning: { type: "boolean", label: "Suppress reasoning deltas in TUI (default on)", default: true },
+    pollMs: { type: "string", label: "Client poll interval (ms)", default: "800" },
   });
   const cfg = await settings.get();
   const retentionDays = Math.max(1, Number.parseInt(cfg.retentionDays ?? "7", 10) || 7);
+  const hideReasoning = cfg.hideReasoning ?? true;
+  const pollMs = Math.max(200, Math.min(10_000, Number.parseInt(cfg.pollMs ?? "800", 10) || 800));
 
   const db = bb.storage.database();
   bb.storage.migrate(db, [
@@ -161,6 +170,7 @@ export default async function plugin(bb: BbPluginApi) {
       version,
       pluginVersion: "0.1.0",
       retentionDays,
+      prefs: { hideReasoning, pollMs },
     };
   }
 
@@ -246,14 +256,23 @@ export default async function plugin(bb: BbPluginApi) {
       return { items: res.rows as unknown[] };
     },
 
-    eventsSince({ afterSeq, limit }) {
+    eventsSince({ afterSeq, limit, threadId }) {
       const seq = afterSeq ?? 0;
-      const rows = db
-        .prepare(
-          `SELECT seq, thread_id AS threadId, type, payload, ts
-             FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?`,
-        )
-        .all(seq, limit ?? 500) as {
+      const rows = (
+        threadId
+          ? db
+              .prepare(
+                `SELECT seq, thread_id AS threadId, type, payload, ts
+                   FROM events WHERE thread_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
+              )
+              .all(threadId, seq, limit ?? 500)
+          : db
+              .prepare(
+                `SELECT seq, thread_id AS threadId, type, payload, ts
+                   FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?`,
+              )
+              .all(seq, limit ?? 500)
+      ) as {
         seq: number;
         threadId: string;
         type: string;

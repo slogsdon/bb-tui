@@ -6,10 +6,14 @@ cd "$(dirname "$0")/../client"
 
 PROJECT="${PROJECT:-proj_m8bt3ak4h3}"   # default: Personal (this host)
 WATCH_SECS="${WATCH_SECS:-30}"
+# Pi routes through the user's opencode-go subscription (zen/go). The
+# `opencode/*` (zen) catalog is billing-blocked on this host (CreditsError).
+PROVIDER="${PROVIDER:-pi}"
+MODEL="${MODEL:-opencode-go/deepseek-v4-flash}"
 PROMPT="${PROMPT:-Write 200 short numbered sentences about terminal design. End with the exact line: DEMO_COMPLETE.}"
 
-echo "== spawning hidden test thread (codex) =="
-SPAWN=$(bb thread spawn --project "$PROJECT" --prompt "$PROMPT" --provider codex --visibility hidden --json)
+echo "== spawning hidden test thread ($PROVIDER / $MODEL) =="
+SPAWN=$(bb thread spawn --project "$PROJECT" --prompt "$PROMPT" --provider "$PROVIDER" --model "$MODEL" --visibility hidden --json)
 TID=$(echo "$SPAWN" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 echo "thread: $TID"
 

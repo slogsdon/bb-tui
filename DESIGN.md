@@ -284,13 +284,23 @@ Phase 1 — prove the loop ✅ (spike complete, verified live):
    (`info`/`list`/`watch`) smoke-tested; spawn → hidden codex thread → 1,351
    delta rows streamed to the buffer → stop+archive cleanup.
 
-Phase 2 — usable TUI (next):
+Phase 2 — usable TUI ✅ (this pass):
 
-4. Detail view streaming render, terminals panes, provider/model picker, reasoning
-   level, fork/stop/retry/compact via CLI; suppress reasoning deltas by default.
-5. Settings + prefs via plugin (`bb plugin config bb-tui set …`) round-trip.
-6. Cursor dedupe between restarts; `eventsSince` gap handling after retention
-   prune (fall back to `getTimeline` re-sync).
+4. Detail view streaming transcript: buffered `item/agentMessage/delta` rows
+   assembled per `(threadId, itemId)` and rendered live beneath the getTimeline
+   history; reasoning deltas (`item/reasoning/*`) suppressed by default (plugin
+   pref, `r` toggles); thread actions `x` stop / `c` compact / `m` model picker
+   (hints from `bb provider models`); spawn defaults to pi/opencode-go
+   (`d` = project defaults); cursors scoped per thread + persisted to
+   `~/.local/state/bb-tui/cursor.json`; per-thread `eventsSince` filter added
+   (server-side) so busy servers don't force backlog pagination.
+5. Settings + prefs via plugin: `bb plugin config bb-tui set hideReasoning …` /
+   `set pollMs …` round-trip verified; served to the client via `getClientInfo`.
+6. Cursor dedupe between global + per-thread streams (seq set); gap re-sync via
+   getTimeline on detail open.
+
+Phase 3 — polish (next): terminals panes, thread-queue UX, sections/pinning,
+prefs editor in the TUI, bundled single-file client (`bb plugin build`).
 
 Phase 2 — usable TUI:
 
@@ -360,7 +370,23 @@ Phase 3 — polish:
   `bb plugin outdated/update`, `bb plugin config`, `bb plugin logs`, `bb plugin run`.
 - No `bb config` command exists today (verified: unknown command).
 
-### Spike-verified facts (Phase 1)
+### Spike-verified facts (Phase 2)
+
+- The pi provider's models are the pi-ai catalogs: `opencode/*` (baseUrl
+  `https://opencode.ai/zen`) and `opencode-go/*` (baseUrl
+  `https://opencode.ai/zen/go`), both authed by `OPENCODE_API_KEY` from
+  `~/.bb/env.json`. On this host the `zen` workspace is billing-blocked
+  (CreditsError 401 — opencode.ai/workspace balance); `zen/go` works: verified
+  `opencode-go/deepseek-v4-flash` answering a live turn. Use `opencode-go/*` for
+  pi; cheap options: `opencode-go/deepseek-v4-flash` (0.14/0.28),
+  `opencode-go/minimax-m3` (0.3/1.2), `opencode-go/qwen3.7-plus` (0.4/1.6).
+- `bb plugin config bb-tui set <key> <value>` + `bb plugin reload bb-tui` applies
+  settings live (no app needed).
+- Timeline rows from `bb.sdk.threads.timeline` are flat here (children: null)
+  and `kind: "conversation"` rows carry `role` + `text` directly.
+- A busy local server streams thousands of rows/hour into the buffer (this chat
+  alone was several thousand) — per-thread `eventsSince` filtering is required,
+  not a nicety.
 
 - `bb.sdk.threads.events.wait` rejects `type: ""` (HTTP 400 "expected string to
   have >=1 characters"); there is no documented "any event" wildcard, so the

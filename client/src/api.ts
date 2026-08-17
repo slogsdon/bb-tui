@@ -162,6 +162,14 @@ export async function spawnThread(projectId: string, prompt: string, provider?: 
   return bbJson<SpawnResult>(args);
 }
 
+/** Fetch a single thread by id (spawned threads may not be in listThreads yet). */
+export async function threadShow(threadId: string): Promise<ThreadRow> {
+  const res = (await bbJson<Record<string, unknown>>(["thread", "show", threadId])) as {
+    thread?: ThreadRow;
+  };
+  return (res.thread ?? res) as ThreadRow;
+}
+
 export function tellThread(threadId: string, message: string): Promise<unknown> {
   return bbJson(["thread", "tell", threadId, message]);
 }

@@ -1,8 +1,9 @@
 // bb-tui — Ink frontend. Phase 2: streaming transcript of buffered deltas,
 // reasoning suppression (default on, `r` toggles), thread actions (x stop /
-// c compact / m model), cursor persistence across restarts.
+// c compact / m model), fixed-position input, transcript scrolling (↑/↓),
+// merge-based thread list refresh, spawn that opens the thread by id.
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useInput, render } from "ink";
+import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
   compactThread,
   discover,
@@ -18,6 +19,7 @@ import {
   spawnThread,
   stopThread,
   tellThread,
+  threadShow,
   timelineLines,
   type BufferedEvent,
   type ClientInfo,
@@ -34,11 +36,33 @@ type View =
 
 const MAX_TAIL = 600;
 const MAX_TRANSCRIPT_CHARS = 600;
+const LIST_WINDOW = 24;
+const SPAWN_CHROME = 8; // rows reserved for chrome in detail view
+
+const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
+
+/** Apply an input chunk to the prompt: erase bytes pop, printable chars append,
+ * remaining control bytes dropped. Handles terminals that batch keystrokes
+ * (e.g. `\x7f\x08` together) and Ink's inconsistent backspace/delete mapping
+ * across PTY modes. */
+function transformInput(prev: string, data: string): string {
+  let s = prev;
+  for (const ch of data) {
+    if (ch === "\x7f" || ch === "\x08") s = s.slice(0, -1);
+    else if (ch >= " " && ch !== "\x7f") s += ch;
+  }
+  return s;
+}
 
 export default function App() {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const rows = stdout.rows || 24;
+
   const [info, setInfo] = useState<ClientInfo | null>(null);
   const [projects, setProjects] = useState<Map<string, string>>(new Map());
+  const [projectOrder, setProjectOrder] = useState<string[]>([]);
+  const [spawnProject, setSpawnProject] = useState<string | undefined>(undefined);
   const [threads, setThreads] = useState<ThreadRow[]>([]);
   const [sel, setSel] = useState(0);
   const [view, setView] = useState<View>({ kind: "list" });
@@ -48,17 +72,20 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting…");
   const [hideReasoning, setHideReasoning] = useState(true);
+  const [scrollUp, setScrollUp] = useState(0); // lines scrolled off bottom
   const [modelHints, setModelHints] = useState<string[]>([]);
 
-  const cursorRef = useRef(0); // global stream cursor
-  const threadCursorRef = useRef(new Map<string, number>()); // per-thread cursors
+  const cursorRef = useRef(0);
+  const threadCursorRef = useRef(new Map<string, number>());
   const seenSeqRef = useRef(new Set<number>());
   const tailRef = useRef<BufferedEvent[]>([]);
   const transcriptsRef = useRef(new Map<string, string>());
   const reasoningRef = useRef(new Map<string, string>());
   const pollMsRef = useRef(800);
   const viewRef = useRef<View>({ kind: "list" });
+  const threadsRef = useRef<ThreadRow[]>([]);
   useEffect(() => void (viewRef.current = view), [view]);
+  useEffect(() => void (threadsRef.current = threads), [threads]);
 
   // Bootstrap: discover, projects, threads.
   useEffect(() => {
@@ -71,7 +98,12 @@ export default function App() {
         setStatus(`bb ${info.version} @ ${info.serverUrl}`);
         cursorRef.current = await loadCursor(info.serverUrl);
         const projs = await listProjects();
+        const order = projs.map((p) => p.id);
+        setProjectOrder(order);
         setProjects(new Map(projs.map((p) => [p.id, p.name])));
+        // Default spawn project: "Personal" if present, else the first.
+        const personal = projs.find((p) => p.name === "Personal");
+        setSpawnProject(personal?.id ?? order[0]);
         const { threads } = await listThreads(info);
         setThreads(threads);
       } catch (err) {
@@ -113,7 +145,7 @@ export default function App() {
           tailRef.current = next;
           setTail(next);
           assembleTranscripts(fresh);
-          refreshThreadStatuses(fresh);
+          refreshThreadStatuses();
         }
       } catch (err) {
         setStatus(`buffer poll error: ${String(err)}`);
@@ -136,12 +168,23 @@ export default function App() {
     }
   }
 
-  function refreshThreadStatuses(events: BufferedEvent[]) {
+  // Merge fresh statuses in place — never drop threads the list call missed.
+  function mergeThreads(rows: ThreadRow[]) {
+    setThreads((prev) => {
+      const byId = new Map(prev.map((t) => [t.id, t]));
+      for (const r of rows) {
+        const old = byId.get(r.id);
+        if (old) byId.set(r.id, { ...old, status: r.status, title: r.title ?? old.title });
+        else byId.set(r.id, r);
+      }
+      return [...byId.values()];
+    });
+  }
+
+  function refreshThreadStatuses() {
     void discover()
       .then((i) => listThreads(i))
-      .then(({ threads }) => {
-        setThreads(threads);
-      })
+      .then(({ threads }) => mergeThreads(threads))
       .catch(() => {});
   }
 
@@ -149,10 +192,11 @@ export default function App() {
     setView({ kind: "detail", thread: t });
     setTimeline([]);
     setInput("");
+    setScrollUp(0);
     setStatus(`opening ${t.id}`);
     try {
       const { items } = await getTimeline(info!, t.id);
-      setTimeline(items.flatMap((i) => timelineLines(i)).slice(-40));
+      setTimeline(items.flatMap((i) => timelineLines(i)).slice(-120));
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
       assembleTranscripts(evs);
       setStatus(`${t.providerId} · ${t.status} · ${t.id}`);
@@ -164,11 +208,12 @@ export default function App() {
   async function send(message: string) {
     if (view.kind !== "detail" || !message.trim()) return;
     setInput("");
+    setScrollUp(0);
     setStatus("sending…");
     try {
       await tellThread(view.thread.id, message.trim());
       setStatus(`sent → ${view.thread.providerId}`);
-      await refreshThreadStatuses(tailRef.current);
+      refreshThreadStatuses();
     } catch (err) {
       setStatus(`tell error: ${String(err)}`);
     }
@@ -176,23 +221,28 @@ export default function App() {
 
   async function doSpawn(promptText: string, useGo: boolean) {
     if (!promptText.trim() || !info) return;
+    const projectId = spawnProject ?? projectOrder[0];
+    if (!projectId) {
+      setStatus("no project available");
+      return;
+    }
+    const target = useGo ? "pi · opencode-go" : "project defaults";
     setInput("");
-    setStatus(useGo ? "spawning thread (pi · opencode-go)…" : "spawning thread (defaults)…");
+    setStatus(`spawning thread (${
+      projects.get(projectId) ?? projectId
+    }, ${target})…`);
     try {
-      const first = projects.keys().next().value as string;
       const result = await spawnThread(
-        first,
+        projectId,
         promptText.trim(),
         useGo ? "pi" : undefined,
         useGo ? "opencode-go/deepseek-v4-flash" : undefined,
       );
-      const { threads } = await listThreads(info);
-      setThreads(threads);
-      const t = threads.find((x) => x.id === result.id);
-      if (t) {
-        setView({ kind: "detail", thread: t });
-        await openThread(t);
-      }
+      // Spawned threads may not be in listThreads yet — fetch by id directly.
+      const t = await threadShow(result.id);
+      mergeThreads([t]);
+      setView({ kind: "detail", thread: t });
+      await openThread(t);
     } catch (err) {
       setStatus(`spawn error: ${String(err)}`);
     }
@@ -200,14 +250,15 @@ export default function App() {
 
   async function doModel(model: string) {
     if (view.kind !== "model" || !model.trim()) return;
+    const t = view.thread;
     setInput("");
     try {
-      await setThreadModel(view.thread.id, model.trim());
+      await setThreadModel(t.id, model.trim());
       setStatus(`model → ${model.trim()}`);
     } catch (err) {
       setStatus(`model error: ${String(err)}`);
     }
-    setView({ kind: "detail", thread: view.thread });
+    setView({ kind: "detail", thread: t });
   }
 
   async function pickModel(t: ThreadRow) {
@@ -216,8 +267,8 @@ export default function App() {
     setStatus("loading models…");
     try {
       const ms = await providerModels(t.providerId);
-      setModelHints(ms.slice(0, 14).map((m) => m.id));
-      setStatus(`${t.providerId}: enter a model id (↑ from list below)`);
+      setModelHints(ms.slice(0, 12).map((m) => m.id));
+      setStatus(`${t.providerId}: enter a model id`);
     } catch {
       setModelHints([]);
       setStatus(`could not list models for ${t.providerId}`);
@@ -230,9 +281,14 @@ export default function App() {
     if (view.kind === "spawn") {
       if (key.return) void doSpawn(input, true);
       else if (key.escape) setView({ kind: "list" });
-      else if (key.backspace) setInput((s) => s.slice(0, -1));
-      else if (data === "d") void doSpawn(input, false);
-      else if (data) setInput((s) => s + data);
+      else if (input === "" && data === "t") {
+        const order = projectOrder;
+        if (order.length > 0) {
+          const i = order.indexOf(spawnProject ?? "");
+          setSpawnProject(order[(i + 1) % order.length]);
+        }
+      } else if (input === "" && data === "d") void doSpawn(input, false);
+      else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
       return;
     }
     if (view.kind === "model") {
@@ -240,35 +296,41 @@ export default function App() {
       else if (key.escape) {
         const t = view.thread;
         setView({ kind: "detail", thread: t });
-      } else if (key.backspace) setInput((s) => s.slice(0, -1));
-      else if (data) setInput((s) => s + data);
+      } else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
       return;
     }
     if (view.kind === "detail") {
       if (key.return) void send(input);
       else if (key.escape) {
         setView({ kind: "list" });
-        void refreshThreadStatuses(tailRef.current);
-      } else if (data === "r") {
+        refreshThreadStatuses();
+      } else if (key.upArrow) setScrollUp((s) => s + 1);
+      else if (key.downArrow) setScrollUp((s) => Math.max(0, s - 1));
+      else if (input === "" && data === "r") {
         setHideReasoning((v) => !v);
         setStatus(`reasoning deltas ${hideReasoning ? "shown" : "hidden"}`);
-      } else if (data === "x") {
+      } else if (input === "" && data === "x") {
         setStatus("stopping…");
-        void stopThread(view.thread.id).then(() => setStatus("stopped"));
-      } else if (data === "c") {
+        void stopThread(view.thread.id).then(() => {
+          setStatus("stopped");
+          refreshThreadStatuses();
+        });
+      } else if (input === "" && data === "c") {
         setStatus("compacting…");
         void compactThread(view.thread.id).then(() => setStatus("compaction requested"));
-      } else if (data === "m") {
+      } else if (input === "" && data === "m") {
         void pickModel(view.thread);
-      } else if (key.backspace) setInput((s) => s.slice(0, -1));
-      else if (data) setInput((s) => s + data);
+      } else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
       return;
     }
     // list view
     if (key.upArrow) setSel((s) => Math.max(0, s - 1));
     else if (key.downArrow) setSel((s) => Math.min(threads.length - 1, s + 1));
     else if (key.return && threads[sel]) void openThread(threads[sel]!);
-    else if (data === "n") setView({ kind: "spawn" });
+    else if (data === "n") {
+      setView({ kind: "spawn" });
+      setInput("");
+    }
   });
 
   const focusedEvents = useMemo(
@@ -276,24 +338,21 @@ export default function App() {
     [tail, view],
   );
 
-  // Streaming transcript of the focused thread: deltas assembled per item.
+  // Streaming transcript lines for the focused thread (reasoning filtered).
   const transcriptLines = useMemo(() => {
     if (view.kind !== "detail") return [];
     const prefix = `${view.thread.id}::`;
     const msgs = [...transcriptsRef.current.entries()]
       .filter(([k, text]) => k.startsWith(prefix) && text.length > 0)
-      .slice(-8)
-      .map(([, text]) => {
-        const oneLine = text.replace(/\n/g, " ").trim();
-        return `A: ${oneLine.length > 110 ? oneLine.slice(0, 110) + "…" : oneLine}`;
-      });
-    const why = hideReasoning
-      ? []
-      : [...reasoningRef.current.entries()]
-          .filter(([k, text]) => k.startsWith(prefix) && text.length > 0)
-          .slice(-4)
-          .map(([, text]) => `   💭 ${text.replace(/\n/g, " ").trim().slice(0, 90)}`);
-    return [...msgs, ...why];
+      .map(([, text]) => `A: ${text.replace(/\n/g, " ").trim()}`);
+    if (!hideReasoning) {
+      for (const [k, text] of reasoningRef.current.entries()) {
+        if (k.startsWith(prefix) && text.length > 0) {
+          msgs.push(`💭 ${text.replace(/\n/g, " ").trim()}`);
+        }
+      }
+    }
+    return msgs;
   }, [focusedEvents, hideReasoning, view]);
 
   const byThread = useMemo(() => {
@@ -302,11 +361,12 @@ export default function App() {
     return m;
   }, [tail]);
 
+  // ---- rendering -------------------------------------------------------
   if (error) {
     return (
       <Box flexDirection="column">
         <Text color="red">bb-tui: {error}</Text>
-        <Text dimColor>hint: install the bb-tui plugin (`bb plugin install …`) or set BB_TUI_SERVER_URL</Text>
+        <Text dimColor>hint: install the bb-tui plugin or set BB_TUI_SERVER_URL</Text>
       </Box>
     );
   }
@@ -314,9 +374,12 @@ export default function App() {
   if (view.kind === "spawn") {
     return (
       <Box flexDirection="column">
-        <Text color="cyan">New thread prompt (pi · opencode-go):</Text>
+        <Text color="cyan">New thread — prompt (enter=spawn pi/opencode-go · d=defaults · t=project)</Text>
+        <Text dimColor>
+          project: {spawnProject ? `${projects.get(spawnProject) ?? spawnProject} (${spawnProject})` : "—"}
+        </Text>
         <Text>{input || " "}</Text>
-        <Text dimColor>enter=spawn (pi/opencode-go) · d=spawn with project defaults · esc=cancel</Text>
+        <Text dimColor>enter=spawn d=defaults t=cycle project esc=cancel</Text>
       </Box>
     );
   }
@@ -324,7 +387,7 @@ export default function App() {
   if (view.kind === "model") {
     return (
       <Box flexDirection="column">
-        <Text color="cyan">Model for {view.thread.id} (current provider {view.thread.providerId}):</Text>
+        <Text color="cyan">Model for {view.thread.id} (provider {view.thread.providerId}):</Text>
         <Text>{input || " "}</Text>
         {modelHints.map((id) => (
           <Text key={id} dimColor wrap="truncate">
@@ -339,9 +402,15 @@ export default function App() {
   if (view.kind === "detail") {
     const t = view.thread;
     const active = t.status === "active" || t.status === "starting";
+    const all = [...timeline, ...transcriptLines];
+    const visibleCount = Math.max(3, rows - SPAWN_CHROME);
+    const scrollable = Math.max(0, all.length - visibleCount);
+    const clamped = Math.min(scrollUp, scrollable);
+    const from = Math.max(0, all.length - visibleCount - clamped);
+    const visible = all.slice(from, from + visibleCount);
     return (
       <Box flexDirection="column">
-        <Box>
+        <Text wrap="truncate">
           <Text color="cyan" bold>
             {(t.title ?? t.titleFallback ?? t.id).slice(0, 80)}
           </Text>
@@ -350,53 +419,66 @@ export default function App() {
             {projects.get(t.projectId) ?? t.projectId} · {t.providerId} · {t.status}
             {active ? " ●" : ""}
           </Text>
-        </Box>
-        <Box height={14} flexDirection="column" borderStyle="round">
-          {timeline.map((line, i) => (
-            <Text key={`tl-${i}`} wrap="truncate">
-              {line.slice(0, 140)}
-            </Text>
-          ))}
-          {transcriptLines.map((line, i) => (
-            <Text key={`tr-${i}`} color={line.startsWith("A:") ? "green" : "yellow"} wrap="truncate">
-              {line.slice(0, 140)}
-            </Text>
-          ))}
-          {active && transcriptLines.length === 0 && <Text dimColor>streaming… (no deltas yet)</Text>}
-        </Box>
-        <Text dimColor>history: {timeline.length} rows · live: {focusedEvents.length} events · seq {cursorRef.current}</Text>
-        <Text dimColor>
-          &gt; <Text color="white">{input || " "}</Text>
         </Text>
-        <Text dimColor>
-          enter=tell r=reasoning({hideReasoning ? "off" : "on"}) x=stop c=compact m=model esc=list ctrl+c=quit · {status}
+        <Box flexDirection="column" borderStyle="round" height={visibleCount + 2}>
+          {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
+          {visible.map((line, i) => {
+            const isTranscript = i >= Math.max(0, visible.length - transcriptLines.length);
+            const color = line.startsWith("U:") ? "blue" : isTranscript ? "green" : undefined;
+            return (
+              <Text key={`${from + i}`} color={color} wrap="truncate">
+                {line}
+              </Text>
+            );
+          })}
+        </Box>
+        <Text dimColor wrap="truncate">
+          {visibleCount + clamped >= all.length ? "▼ bottom" : `▲ ${clamped} up`} · history {timeline.length} · live{" "}
+          {focusedEvents.length} · seq {cursorRef.current}
+        </Text>
+        <Text wrap="truncate">
+          &gt; <Text color={active ? "green" : "white"}>{input || " "}</Text>
+        </Text>
+        <Text dimColor wrap="truncate">
+          enter=tell ↑↓=scroll r=reasoning({hideReasoning ? "off" : "on"}) x=stop c=compact m=model esc=list ctrl+c=quit ·{" "}
+          {status}
         </Text>
       </Box>
     );
   }
 
+  // list view
+  const firstVisible = Math.max(0, sel - 4);
+  const visibleThreads = threads.slice(firstVisible, firstVisible + LIST_WINDOW);
   return (
     <Box flexDirection="column">
       <Text color="cyan" bold>
         bb-tui
       </Text>
-      <Text dimColor>
+      <Text dimColor wrap="truncate">
         {status} · {projects.size} projects · {threads.length} threads
       </Text>
       {threads.length === 0 && <Text dimColor>no threads (or plugin not installed)</Text>}
-      {threads.slice(0, 40).map((t, i) => {
+      {visibleThreads.map((t, i) => {
+        const abs = firstVisible + i;
         const last = byThread.get(t.id);
         const marker = last ? ` ⟶ ${last.type}` : "";
         return (
-          <Text key={t.id} color={i === sel ? "green" : undefined} wrap="truncate">
-            {i === sel ? "> " : "  "}
+          <Text
+            key={t.id}
+            color={abs === sel ? "green" : undefined}
+            wrap="truncate"
+          >
+            {abs === sel ? "> " : "  "}
             {t.status === "active" ? "●" : t.status === "idle" ? "○" : "✗"} {t.providerId.padEnd(10)}{" "}
             {(t.title ?? t.titleFallback ?? t.id).slice(0, 60)}
             <Text dimColor>{marker}</Text>
           </Text>
         );
       })}
-      <Text dimColor>↑/↓ select · enter open · n new thread · ctrl+c quit</Text>
+      <Text dimColor wrap="truncate">
+        ↑/↓ select · enter open · n new thread · ctrl+c quit
+      </Text>
     </Box>
   );
 }

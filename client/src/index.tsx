@@ -31,6 +31,7 @@ import {
 } from "./api.js";
 import { calculatePaneLayout, WorkspaceLayout, type ListRow } from "./layout.js";
 import { renderBlocks, type TranscriptBlock } from "./markdown.js";
+import { applyKey, EMPTY, layoutComposer, type Composer } from "./composer.js";
 import { enterAlternateScreen } from "./terminal.js";
 
 type View =
@@ -112,7 +113,7 @@ export default function App() {
   const [focus, setFocus] = useState<"list" | "detail">("list");
   const [tail, setTail] = useState<BufferedEvent[]>([]);
   const [timeline, setTimeline] = useState<TranscriptBlock[]>([]);
-  const [input, setInput] = useState("");
+  const [composer, setComposer] = useState<Composer>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting…");
   const [hideReasoning, setHideReasoning] = useState(true);
@@ -361,7 +362,7 @@ export default function App() {
     setView({ kind: "detail", thread: snapshot });
     setFocus("detail");
     setTimeline([]);
-    setInput("");
+    setComposer(EMPTY);
     setScrollUp(0);
     setStatus(`opening ${t.id}`);
     try {
@@ -378,7 +379,7 @@ export default function App() {
   function backToHome() {
     setView({ kind: "home" });
     setFocus("list");
-    setInput("");
+    setComposer(EMPTY);
     refreshThreadStatuses();
   }
 
@@ -390,10 +391,10 @@ export default function App() {
   }
 
   async function send() {
-    if (view.kind !== "detail" || !input.trim()) return;
+    if (view.kind !== "detail" || !composer.text.trim()) return;
     const tid = view.thread.id;
-    const text = input.trim();
-    setInput("");
+    const text = composer.text.trim();
+    setComposer(EMPTY);
     setScrollUp(0);
     appendUserMsg(tid, text);
     setStatus("sending…");
@@ -415,7 +416,7 @@ export default function App() {
     }
     const target = useGo ? "pi · opencode-go" : "project defaults";
     const text = promptText.trim();
-    setInput("");
+    setComposer(EMPTY);
     setStatus(`spawning thread (${projects.get(projectId) ?? projectId}, ${target})…`);
     try {
       const result = await spawnThread(
@@ -439,7 +440,7 @@ export default function App() {
   async function doModel(model: string) {
     if (view.kind !== "model" || !model.trim()) return;
     const t = view.thread;
-    setInput("");
+    setComposer(EMPTY);
     try {
       await setThreadModel(t.id, model.trim());
       setStatus(`model → ${model.trim()}`);
@@ -452,7 +453,7 @@ export default function App() {
 
   async function pickModel(t: ThreadRow) {
     setView({ kind: "model", thread: t });
-    setInput("");
+    setComposer(EMPTY);
     setStatus("loading models…");
     try {
       const ms = await providerModels(t.providerId);
@@ -488,25 +489,25 @@ export default function App() {
     }
 
     if (view.kind === "spawn") {
-      if (key.return) void doSpawn(input, true);
+      if (key.return) void doSpawn(composer.text, true);
       else if (key.escape || data === "q") setView({ kind: "home" });
-      else if (input === "" && data === "t") {
+      else if (key.ctrl && data === "t") {
         const order = projectOrder;
         if (order.length > 0) {
           const i = order.indexOf(spawnProject ?? "");
           setSpawnProject(order[(i + 1) % order.length]);
         }
-      } else if (input === "" && data === "d") void doSpawn(input, false);
-      else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
+      } else if (key.ctrl && data === "d") void doSpawn(composer.text, false);
+      else setComposer((c) => applyKey(c, data, key));
       return;
     }
     if (view.kind === "model") {
-      if (key.return) void doModel(input);
+      if (key.return) void doModel(composer.text);
       else if (key.escape || data === "q") {
         const t = view.thread;
         setView({ kind: "detail", thread: t });
         setFocus("detail");
-      } else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
+      } else setComposer((c) => applyKey(c, data, key));
       return;
     }
     if (view.kind === "detail") {
@@ -518,32 +519,38 @@ export default function App() {
         else if (data === "/") startFilter();
         else if (data === "n") {
           setView({ kind: "spawn" });
-          setInput("");
+          setComposer(EMPTY);
         } else if (key.tab) setFocus("detail");
         else if (key.escape || data === "q") backToHome();
         return;
       }
-      // composer focus
-      if (key.return) void send();
-      else if (key.escape || data === "q") setFocus("list");
+      // Composer focus. Every printable key belongs to the message — the
+      // actions live on ctrl chords, because gating them on an empty composer
+      // meant a message could not begin with those letters.
+      if (key.return && key.shift) setComposer((c) => applyKey(c, "\n", {}));
+      else if (key.return) void send();
+      else if (key.ctrl && data === "o") setComposer((c) => applyKey(c, "\n", {}));
+      else if (key.escape) setFocus("list");
       else if (key.tab) setFocus("list");
-      else if (key.upArrow) setScrollUp((s) => s + 1);
-      else if (key.downArrow) setScrollUp((s) => Math.max(0, s - 1));
-      else if (input === "" && data === "r") {
-        setHideReasoning((v) => !v);
-        setStatus(`reasoning deltas ${hideReasoning ? "shown" : "hidden"}`);
-      } else if (input === "" && data === "x") {
+      // Arrows keep scrolling the transcript, as before; left/right reach the
+      // composer so the cursor can still move.
+      else if (key.upArrow || key.pageUp) setScrollUp((s) => s + 1);
+      else if (key.downArrow || key.pageDown) setScrollUp((s) => Math.max(0, s - 1));
+      else if (key.ctrl && data === "x") {
         setStatus("stopping…");
         void stopThread(view.thread.id).then(() => {
           setStatus("stopped");
           refreshThreadStatuses();
         });
-      } else if (input === "" && data === "c") {
+      } else if (key.ctrl && data === "r") {
+        setHideReasoning((v) => !v);
+        setStatus(`reasoning deltas ${hideReasoning ? "shown" : "hidden"}`);
+      } else if (key.ctrl && data === "t") {
         setStatus("compacting…");
         void compactThread(view.thread.id).then(() => setStatus("compaction requested"));
-      } else if (input === "" && data === "m") {
+      } else if (key.ctrl && data === "p") {
         void pickModel(view.thread);
-      } else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
+      } else setComposer((c) => applyKey(c, data, key));
       return;
     }
     // home view (no detail open)
@@ -554,7 +561,7 @@ export default function App() {
     else if (data === "/") startFilter();
     else if (data === "n") {
       setView({ kind: "spawn" });
-      setInput("");
+      setComposer(EMPTY);
     }
   });
 
@@ -682,10 +689,10 @@ export default function App() {
 
   const paneLayout = calculatePaneLayout(cols, focus);
   const detailInnerW = Math.max(8, (paneLayout.detailWidth || cols - 1) - 4);
-  const inputRows = useMemo(() => {
-    if (!input) return [""];
-    return wrapToWidth(input, detailInnerW).slice(-MAX_INPUT_ROWS);
-  }, [input, detailInnerW]);
+  const composerLayout = useMemo(
+    () => layoutComposer(composer, detailInnerW, MAX_INPUT_ROWS),
+    [composer, detailInnerW],
+  );
 
   const detailLines = useMemo(
     () => (view.kind === "detail" ? renderBlocks(conversation.blocks, detailInnerW) : []),
@@ -714,9 +721,9 @@ export default function App() {
         <Text dimColor>
           project: {spawnProject ? `${projects.get(spawnProject) ?? spawnProject} (${spawnProject})` : "—"}
         </Text>
-        {inputRows.map((l, i) => (
+        {composerLayout.rows.map((l, i) => (
           <Text key={i} wrap="truncate">
-            {i === inputRows.length - 1 ? `> ${l}` : `  ${l}`}
+            {i === composerLayout.rows.length - 1 ? `> ${l}` : `  ${l}`}
           </Text>
         ))}
         <Text dimColor>enter=spawn d=defaults t=cycle project esc/q=cancel</Text>
@@ -728,9 +735,9 @@ export default function App() {
     return (
       <Box flexDirection="column">
         <Text color="cyan">Model for {view.thread.id} (provider {view.thread.providerId}):</Text>
-        {inputRows.map((l, i) => (
+        {composerLayout.rows.map((l, i) => (
           <Text key={i} wrap="truncate">
-            {i === inputRows.length - 1 ? `> ${l}` : `  ${l}`}
+            {i === composerLayout.rows.length - 1 ? `> ${l}` : `  ${l}`}
           </Text>
         ))}
         {modelHints.map((id) => (
@@ -787,7 +794,7 @@ export default function App() {
               hostNames,
               detailLines,
               scrollUp,
-              inputRows,
+              composer: composerLayout,
               focus,
               elapsedSeconds,
               debug: process.env.BB_TUI_DEBUG

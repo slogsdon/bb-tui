@@ -2,6 +2,7 @@ import React, { type ReactNode } from "react";
 import { Box, Text } from "ink";
 import type { ThreadRow } from "./api.js";
 import type { MdLine } from "./markdown.js";
+import type { ComposerLayout } from "./composer.js";
 
 export type PaneFocus = "list" | "detail";
 
@@ -135,7 +136,7 @@ export type ThreadPaneProps = {
   hostNames: Map<string, string>;
   detailLines: MdLine[];
   scrollUp: number;
-  inputRows: string[];
+  composer: ComposerLayout;
   focus: PaneFocus;
   /** Seconds the current turn has been running, when one is. */
   elapsedSeconds: number | null;
@@ -169,6 +170,22 @@ export function contextRow(props: ThreadPaneProps): string[] {
   return parts.filter((p) => p !== "");
 }
 
+/** One composer row with the cursor drawn as an inverse cell. Terminals hide the
+ * real cursor in the alternate screen, so the block is the only position cue. */
+function CursorLine(props: { text: string; column: number; focused: boolean }) {
+  const before = props.text.slice(0, props.column);
+  const under = props.text.slice(props.column, props.column + 1) || " ";
+  const after = props.text.slice(props.column + 1);
+  if (!props.focused) return <Text>{props.text === "" ? " " : props.text}</Text>;
+  return (
+    <Text>
+      {before}
+      <Text inverse>{under}</Text>
+      {after}
+    </Text>
+  );
+}
+
 /** Render thread history and a fixed-height, visually distinct composer. */
 export function ThreadPane(props: ThreadPaneProps) {
   const thread = props.thread;
@@ -178,7 +195,8 @@ export function ThreadPane(props: ThreadPaneProps) {
   const clamped = Math.min(props.scrollUp, scrollable);
   const from = Math.max(0, props.detailLines.length - visibleCount - clamped);
   const visible = props.detailLines.slice(from, from + visibleCount);
-  const inputRows = props.inputRows.slice(-3);
+  const composer = props.composer;
+  const empty = composer.rows.length === 1 && composer.rows[0] === "";
 
   return (
     <Box flexDirection="column" width={props.width} height={props.height} borderStyle="round" overflow="hidden">
@@ -226,13 +244,23 @@ export function ThreadPane(props: ThreadPaneProps) {
         borderColor={props.focus === "detail" ? "cyan" : "gray"}
         paddingX={1}
       >
-        <Text color={props.focus === "detail" ? "cyan" : "gray"}>MESSAGE</Text>
-        {inputRows.length === 1 && inputRows[0] === "" ? (
-          <Text dimColor>Type a message…</Text>
+        <Text color={props.focus === "detail" ? "cyan" : "gray"}>
+          MESSAGE
+          {composer.scrolled ? <Text dimColor> ▲</Text> : ""}
+        </Text>
+        {empty ? (
+          <Text>
+            {props.focus === "detail" ? <Text inverse> </Text> : ""}
+            <Text dimColor>Type a message… (enter sends · shift-enter or ctrl-o for a new line)</Text>
+          </Text>
         ) : (
-          inputRows.map((line, index) => (
-            <Text key={index} color={active ? "green" : "white"} wrap="truncate">
-              {line === "" ? " " : line}
+          composer.rows.map((line, index) => (
+            <Text key={index} wrap="truncate">
+              {index === composer.cursorRow ? (
+                <CursorLine text={line} column={composer.cursorCol} focused={props.focus === "detail"} />
+              ) : (
+                <Text>{line === "" ? " " : line}</Text>
+              )}
             </Text>
           ))
         )}
@@ -294,13 +322,13 @@ export function WorkspaceLayout(props: WorkspaceLayoutProps) {
 export function ShortcutFooter(props: { compact: boolean; detailOpen: boolean; focus: PaneFocus }) {
   const shortcuts = props.compact
     ? props.detailOpen && props.focus === "detail"
-      ? "↑/↓ scroll · enter send · tab list · r/x/c/m · q quit"
+      ? "↑/↓ scroll · enter send · ^o newline · ^x stop · tab list"
       : "↑/↓ select · ←/→ fold · / filter · enter open · n new · q quit"
     : !props.detailOpen
       ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · esc home · q quit"
       : props.focus === "list"
         ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · tab composer · esc home · q quit"
-        : "↑/↓ scroll · enter send · tab list · r/x/c/m actions · esc list · q quit";
+        : "↑/↓ scroll · enter send · ⇧enter/^o newline · ^x stop · ^r ^t ^p · tab list · esc list";
   return (
     <Text dimColor wrap="truncate">
       {shortcuts}

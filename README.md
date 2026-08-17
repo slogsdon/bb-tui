@@ -18,11 +18,14 @@ A terminal UI around the bb ecosystem. **Phase 1 spike complete** — see
   columns; contextual shortcuts below pane borders; `tab` switches focus;
   `←/→` folds a project; `/` filters by thread or project title; right-aligned
   branch/machine column (live activity while a thread runs); composer context
-  line (project · machine · branch · provider · turn elapsed); actions (`x`
-  stop / `c` compact / `m` model); per-thread cursors; archived threads
-  excluded; discovery cached; status refreshes event-gated.
+  line (project · machine · branch · provider · turn elapsed); per-thread
+  cursors; archived threads excluded; discovery cached; status refreshes
+  event-gated.
   Set `BB_TUI_DEBUG=1` to append buffer counters to the context line.
   `ctrl-l` forces a full repaint, and a resize repaints rather than diffing.
+  Composer editing is readline-style (`ctrl-a/e`, `ctrl-b/f`, `ctrl-u/k/w`,
+  arrows); `enter` sends, `shift-enter` or `ctrl-o` inserts a newline, and
+  actions are `ctrl-x` stop, `ctrl-r` reasoning, `ctrl-t` compact, `ctrl-p` model.
 - ⏭ Next: Phase 3 — terminals panes, queue UX, bundled single-file client.
 
 ## Pi provider note
@@ -71,6 +74,12 @@ Requires a bb server on loopback (the bb app or `bb` daemon). Discovery:
   of every cell, and a resize (the iOS keyboard opening and closing is the
   common trigger) repaints instead of letting Ink diff against a frame the
   client may have mangled.
+- `shift-enter` depends on the terminal. Most send the same byte (CR) for Enter
+  and Shift+Enter, so the app cannot tell them apart; `ctrl-o` always works.
+  Terminals that can be configured to send a line feed for Shift+Enter get it
+  for free — in Ghostty, `keybind = shift+enter=text:\n`; in iTerm2, a key
+  binding sending `\n`. The client also accepts a shift-modified return
+  reported through CSI modifiers, for terminals that provide one.
 - Repainting cannot go through Ink's `clear()`. That erases the screen but
   leaves `lastOutput` set, and Ink skips writing when the next frame matches it,
   so the screen stays blank until something genuinely changes. The client

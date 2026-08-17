@@ -46,6 +46,9 @@ const sampleThread: ThreadRow = {
 /** One plain transcript line, as the markdown renderer would emit it. */
 const line = (text: string) => ({ spans: [{ text }] });
 
+/** An empty composer, as layoutComposer would return it. */
+const emptyComposer = { rows: [""], cursorRow: 0, cursorCol: 0, scrolled: false };
+
 function stripAnsi(text: string): string {
   return text.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
 }
@@ -226,7 +229,7 @@ test("the context row carries where the thread runs, not debug counters", () => 
     hostNames: new Map([["host_1", "mac-mini"]]),
     detailLines: [],
     scrollUp: 0,
-    inputRows: [""],
+    composer: emptyComposer,
     focus: "detail",
     elapsedSeconds: 18,
     width: 80,
@@ -250,7 +253,7 @@ test("debug counters appear only when explicitly requested", () => {
     hostNames: new Map(),
     detailLines: [],
     scrollUp: 0,
-    inputRows: [""],
+    composer: emptyComposer,
     focus: "detail",
     elapsedSeconds: null,
     debug: { timelineLength: 10, conversationLive: 0, cursorSeq: 42 },
@@ -270,7 +273,7 @@ test("thread composer renders a labeled focused border and placeholder", () => {
       hostNames={new Map()}
       detailLines={[line("› Improve the UI"), line("Inspecting the render")]}
       scrollUp={0}
-      inputRows={[""]}
+      composer={emptyComposer}
       focus="detail"
       width={83}
       height={36}
@@ -304,7 +307,7 @@ test("workspace renders shortcuts below both pane borders", () => {
         hostNames: new Map(),
         detailLines: [line("› Improve the UI")],
         scrollUp: 0,
-        inputRows: [""],
+        composer: emptyComposer,
         focus: "detail",
       }}
     />,
@@ -335,7 +338,7 @@ test("compact workspace renders only the focused detail pane", () => {
         hostNames: new Map(),
         detailLines: [line("DETAIL CONTENT")],
         scrollUp: 0,
-        inputRows: [""],
+        composer: emptyComposer,
         focus: "detail",
       }}
     />,
@@ -345,10 +348,10 @@ test("compact workspace renders only the focused detail pane", () => {
 
   assert.match(frame, /DETAIL CONTENT/);
   assert.doesNotMatch(frame, /Start Claude Opus UI thread\s+.*Start Claude Opus UI thread/);
-  assert.match(frame.split("\n").at(-1) ?? "", /q quit/);
+  assert.match(frame.split("\n").at(-1) ?? "", /tab list/);
 });
 
-test("detail footer keeps the quit shortcut visible at 80 columns", () => {
+test("detail footer keeps its shortcuts visible at 80 columns", () => {
   const frame = renderFrame(
     <WorkspaceLayout
       columns={80}
@@ -370,7 +373,7 @@ test("detail footer keeps the quit shortcut visible at 80 columns", () => {
         hostNames: new Map(),
         detailLines: [line("DETAIL CONTENT")],
         scrollUp: 0,
-        inputRows: [""],
+        composer: emptyComposer,
         focus: "detail",
       }}
     />,
@@ -378,5 +381,5 @@ test("detail footer keeps the quit shortcut visible at 80 columns", () => {
     24,
   );
 
-  assert.match(frame.split("\n").at(-1) ?? "", /q quit/);
+  assert.match(frame.split("\n").at(-1) ?? "", /tab list/);
 });

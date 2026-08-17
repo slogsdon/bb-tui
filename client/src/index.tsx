@@ -28,7 +28,7 @@ import {
   type Project,
   type ThreadRow,
 } from "./api.js";
-import { calculatePaneLayout, WorkspaceLayout } from "./layout.js";
+import { calculatePaneLayout, WorkspaceLayout, type ListRow } from "./layout.js";
 import { renderBlocks, type TranscriptBlock } from "./markdown.js";
 import { enterAlternateScreen } from "./terminal.js";
 
@@ -111,6 +111,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting…");
   const [hideReasoning, setHideReasoning] = useState(true);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
+  const [filtering, setFiltering] = useState(false);
   const [scrollUp, setScrollUp] = useState(0);
   const [modelHints, setModelHints] = useState<string[]>([]);
 
@@ -393,6 +396,23 @@ export default function App() {
   useInput((data, key) => {
     if (key.ctrl && data === "c") return exit();
 
+    // Filter mode owns every keystroke until it is dismissed, otherwise typing
+    // a title would trigger the single-key actions underneath it.
+    if (filtering) {
+      if (key.escape) {
+        setFiltering(false);
+        setFilter("");
+      } else if (key.return) {
+        setFiltering(false);
+      } else if (key.upArrow) setSel((s) => Math.max(0, s - 1));
+      else if (key.downArrow) setSel((s) => Math.min(listRows.length - 1, s + 1));
+      else if (isEraseKey(key) || data) {
+        setFilter((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
+        setSel(0);
+      }
+      return;
+    }
+
     if (view.kind === "spawn") {
       if (key.return) void doSpawn(input, true);
       else if (key.escape || data === "q") setView({ kind: "home" });
@@ -418,8 +438,10 @@ export default function App() {
     if (view.kind === "detail") {
       if (focus === "list") {
         if (key.upArrow) setSel((s) => Math.max(0, s - 1));
-        else if (key.downArrow) setSel((s) => Math.min(threads.length - 1, s + 1));
-        else if (key.return && threads[sel]) void openThread(threads[sel]!);
+        else if (key.downArrow) setSel((s) => Math.min(listRows.length - 1, s + 1));
+        else if (key.return) activateRow();
+        else if (key.leftArrow || key.rightArrow) collapseKey(key.rightArrow === true);
+        else if (data === "/") startFilter();
         else if (data === "n") {
           setView({ kind: "spawn" });
           setInput("");
@@ -452,8 +474,10 @@ export default function App() {
     }
     // home view (no detail open)
     if (key.upArrow) setSel((s) => Math.max(0, s - 1));
-    else if (key.downArrow) setSel((s) => Math.min(threads.length - 1, s + 1));
-    else if (key.return && threads[sel]) void openThread(threads[sel]!);
+    else if (key.downArrow) setSel((s) => Math.min(listRows.length - 1, s + 1));
+    else if (key.return) activateRow();
+    else if (key.leftArrow || key.rightArrow) collapseKey(key.rightArrow === true);
+    else if (data === "/") startFilter();
     else if (data === "n") {
       setView({ kind: "spawn" });
       setInput("");
@@ -493,6 +517,83 @@ export default function App() {
       .map((text) => ({ role: "user" as const, text }));
     return { blocks: [...timeline, ...users, ...agent], live: focusedEvents.length };
   }, [timeline, focusedEvents, hideReasoning, view]);
+
+  // Navigator rows: threads grouped under their project. A flat list of every
+  // thread on the host is unnavigable past ~20 rows; the project is the unit
+  // people actually search by. Projects sort by their most recent thread, so
+  // whatever just moved floats up.
+  const listRows = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    const matches = (t: ThreadRow) =>
+      needle === "" ||
+      (t.title ?? t.titleFallback ?? t.id).toLowerCase().includes(needle) ||
+      (projects.get(t.projectId) ?? "").toLowerCase().includes(needle);
+    const groups = new Map<string, ThreadRow[]>();
+    for (const t of threads) {
+      if (!matches(t)) continue;
+      const list = groups.get(t.projectId);
+      if (list) list.push(t);
+      else groups.set(t.projectId, [t]);
+    }
+    const recency = (list: ThreadRow[]) => Math.max(...list.map((t) => t.updatedAt ?? 0));
+    const ordered = [...groups.entries()].sort((a, b) => recency(b[1]) - recency(a[1]));
+    const rows: ListRow[] = [];
+    for (const [projectId, list] of ordered) {
+      // A filter that hides its own matches is useless — searching overrides fold state.
+      const isCollapsed = needle === "" && collapsed.has(projectId);
+      rows.push({
+        kind: "project",
+        projectId,
+        name: projects.get(projectId) ?? projectId,
+        count: list.length,
+        collapsed: isCollapsed,
+      });
+      if (!isCollapsed) for (const thread of list) rows.push({ kind: "thread", thread });
+    }
+    return rows;
+  }, [threads, projects, collapsed, filter]);
+
+  const selectedRow = listRows[sel];
+
+  function toggleProject(projectId: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  }
+
+  /** Enter: open a thread, or fold the project it lands on. */
+  function activateRow() {
+    if (!selectedRow) return;
+    if (selectedRow.kind === "project") toggleProject(selectedRow.projectId);
+    else void openThread(selectedRow.thread);
+  }
+
+  function startFilter() {
+    setFiltering(true);
+    setFilter("");
+    setSel(0);
+  }
+
+  /** ←/→ fold and unfold. On a thread row, ← jumps to its project header so a
+   * whole group can be closed without hunting for the header first. */
+  function collapseKey(expand: boolean) {
+    if (!selectedRow) return;
+    if (selectedRow.kind === "project") {
+      if (expand === collapsed.has(selectedRow.projectId)) toggleProject(selectedRow.projectId);
+      return;
+    }
+    if (expand) return;
+    const header = listRows.findIndex(
+      (r) => r.kind === "project" && r.projectId === selectedRow.thread.projectId,
+    );
+    if (header >= 0) {
+      setSel(header);
+      toggleProject(selectedRow.thread.projectId);
+    }
+  }
 
   // Latest meaningful activity per thread (content, not raw event names).
   const byThread = useMemo(() => {
@@ -563,8 +664,10 @@ export default function App() {
     );
   }
 
-  const firstVisible = Math.max(0, sel - 4);
   const visibleCount = Math.max(4, rows - 6);
+  // Keep the selection four rows down the pane, but stop scrolling once the end
+  // of the list is on screen.
+  const firstVisible = Math.max(0, Math.min(sel - 4, listRows.length - visibleCount));
 
   return (
     <WorkspaceLayout
@@ -576,13 +679,21 @@ export default function App() {
           <Text color="cyan" bold>
             bb-tui
           </Text>
-          <Text dimColor>
-            {" "}· {status} · {projects.size} projects · {threads.length} threads · tab=focus
-          </Text>
+          {filtering || filter !== "" ? (
+            <Text color="yellow">
+              {" "}
+              /{filter}
+              {filtering ? "_" : ""} · {listRows.length} rows
+            </Text>
+          ) : (
+            <Text dimColor>
+              {" "}· {status} · {projects.size} projects · {threads.length} threads · tab=focus
+            </Text>
+          )}
         </>
       }
       list={{
-        threads,
+        rows: listRows,
         selectedIndex: sel,
         firstVisible,
         visibleCount,

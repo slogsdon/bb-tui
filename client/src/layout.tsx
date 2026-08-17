@@ -39,8 +39,14 @@ const STATUS_STYLE: Record<string, { glyph: string; color: string }> = {
   idle: { glyph: "○", color: "gray" },
 };
 
+/** One navigator row. Projects and their threads share a single index space so
+ * arrow keys move through the tree without special cases. */
+export type ListRow =
+  | { kind: "project"; projectId: string; name: string; count: number; collapsed: boolean }
+  | { kind: "thread"; thread: ThreadRow };
+
 export type ThreadListPaneProps = {
-  threads: ThreadRow[];
+  rows: ListRow[];
   selectedIndex: number;
   firstVisible: number;
   visibleCount: number;
@@ -49,15 +55,28 @@ export type ThreadListPaneProps = {
   height: number;
 };
 
-/** Render the thread navigator without provider labels. */
+/** Render the thread navigator: threads grouped under their project, without
+ * provider labels. */
 export function ThreadListPane(props: ThreadListPaneProps) {
-  const visibleThreads = props.threads.slice(props.firstVisible, props.firstVisible + props.visibleCount);
+  const visibleRows = props.rows.slice(props.firstVisible, props.firstVisible + props.visibleCount);
+  const remaining = props.rows.length - (props.firstVisible + props.visibleCount);
 
   return (
     <Box flexDirection="column" width={props.width} height={props.height} borderStyle="round" overflow="hidden">
-      {props.threads.length === 0 && <Text dimColor>no threads</Text>}
-      {visibleThreads.map((thread, index) => {
+      {props.rows.length === 0 && <Text dimColor>no threads</Text>}
+      {visibleRows.map((row, index) => {
         const selected = props.firstVisible + index === props.selectedIndex;
+
+        if (row.kind === "project") {
+          return (
+            <Text key={`p:${row.projectId}`} color={selected ? "green" : undefined} wrap="truncate">
+              {selected ? "›" : " "}
+              {row.collapsed ? "▸" : "▾"} <Text bold>{row.name}</Text> <Text dimColor>{row.count}</Text>
+            </Text>
+          );
+        }
+
+        const thread = row.thread;
         const status = STATUS_STYLE[thread.status] ?? STATUS_STYLE.idle!;
         const marker = props.activityByThread.get(thread.id);
         const markerWidth = marker ? Math.min(14, Math.max(8, Math.floor(props.width * 0.25))) : 0;
@@ -71,15 +90,14 @@ export function ThreadListPane(props: ThreadListPaneProps) {
             <Text color={status.color}>{status.glyph}</Text> {title}
             {marker && (
               <Text dimColor>
-                {" "}⟶ {marker.slice(0, markerWidth)}
+                {" "}
+                {marker.slice(0, markerWidth)}
               </Text>
             )}
           </Text>
         );
       })}
-      {props.threads.length > props.visibleCount && (
-        <Text dimColor>… {props.threads.length - props.visibleCount} more</Text>
-      )}
+      {remaining > 0 && <Text dimColor>… {remaining} more</Text>}
     </Box>
   );
 }
@@ -222,11 +240,11 @@ export function ShortcutFooter(props: { compact: boolean; detailOpen: boolean; f
   const shortcuts = props.compact
     ? props.detailOpen && props.focus === "detail"
       ? "↑/↓ scroll · enter send · tab list · r/x/c/m · q quit"
-      : "↑/↓ select · enter open · n new · q quit"
+      : "↑/↓ select · ←/→ fold · / filter · enter open · n new · q quit"
     : !props.detailOpen
-      ? "↑/↓ select · enter open · n new · esc home · q quit"
+      ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · esc home · q quit"
       : props.focus === "list"
-        ? "↑/↓ select · enter open · n new · tab composer · esc home · q quit"
+        ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · tab composer · esc home · q quit"
         : "↑/↓ scroll · enter send · tab list · r/x/c/m actions · esc list · q quit";
   return (
     <Text dimColor wrap="truncate">

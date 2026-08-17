@@ -90,7 +90,7 @@ test("collapses to the focused detail pane below 72 columns", () => {
 test("thread list renders status and title without provider identifiers", () => {
   const frame = renderFrame(
     <ThreadListPane
-      threads={[sampleThread]}
+      rows={[{ kind: "thread", thread: sampleThread }]}
       selectedIndex={0}
       firstVisible={0}
       visibleCount={1}
@@ -102,6 +102,60 @@ test("thread list renders status and title without provider identifiers", () => 
 
   assert.match(frame, /● Start Claude Opus UI thread/);
   assert.doesNotMatch(frame, /codex\s+Start Claude/);
+});
+
+test("project rows show a fold marker and their thread count", () => {
+  const frame = renderFrame(
+    <ThreadListPane
+      rows={[
+        { kind: "project", projectId: "proj_bb_tui", name: "bb-tui", count: 2, collapsed: false },
+        { kind: "thread", thread: sampleThread },
+        { kind: "project", projectId: "proj_personal", name: "Personal", count: 9, collapsed: true },
+      ]}
+      selectedIndex={0}
+      firstVisible={0}
+      visibleCount={3}
+      activityByThread={new Map()}
+      width={36}
+      height={12}
+    />,
+  );
+
+  assert.match(frame, /▾ bb-tui 2/);
+  assert.match(frame, /▸ Personal 9/);
+  assert.match(frame, /● Start Claude Opus UI thread/);
+});
+
+test("the overflow count reflects the scroll position, not the list length", () => {
+  const rows = Array.from({ length: 10 }, (_, i) => ({
+    kind: "thread" as const,
+    thread: { ...sampleThread, id: `thr_${i}` },
+  }));
+  const atTop = renderFrame(
+    <ThreadListPane
+      rows={rows}
+      selectedIndex={0}
+      firstVisible={0}
+      visibleCount={4}
+      activityByThread={new Map()}
+      width={36}
+      height={12}
+    />,
+  );
+  const atBottom = renderFrame(
+    <ThreadListPane
+      rows={rows}
+      selectedIndex={9}
+      firstVisible={6}
+      visibleCount={4}
+      activityByThread={new Map()}
+      width={36}
+      height={12}
+    />,
+  );
+
+  assert.match(atTop, /… 6 more/);
+  assert.doesNotMatch(atBottom, /more/);
 });
 
 test("thread composer renders a labeled focused border and placeholder", () => {
@@ -134,7 +188,7 @@ test("workspace renders shortcuts below both pane borders", () => {
       focus="detail"
       topBar="bb-tui · active"
       list={{
-        threads: [sampleThread],
+        rows: [{ kind: "thread" as const, thread: sampleThread }],
         selectedIndex: 0,
         firstVisible: 0,
         visibleCount: 1,
@@ -165,7 +219,7 @@ test("compact workspace renders only the focused detail pane", () => {
       focus="detail"
       topBar="bb-tui · active"
       list={{
-        threads: [sampleThread],
+        rows: [{ kind: "thread" as const, thread: sampleThread }],
         selectedIndex: 0,
         firstVisible: 0,
         visibleCount: 1,
@@ -200,7 +254,7 @@ test("detail footer keeps the quit shortcut visible at 80 columns", () => {
       focus="detail"
       topBar="bb-tui · active"
       list={{
-        threads: [sampleThread],
+        rows: [{ kind: "thread" as const, thread: sampleThread }],
         selectedIndex: 0,
         firstVisible: 0,
         visibleCount: 1,

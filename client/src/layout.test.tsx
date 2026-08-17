@@ -41,6 +41,9 @@ const sampleThread: ThreadRow = {
   archivedAt: null,
 };
 
+/** One plain transcript line, as the markdown renderer would emit it. */
+const line = (text: string) => ({ spans: [{ text }] });
+
 function stripAnsi(text: string): string {
   return text.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
 }
@@ -108,7 +111,7 @@ test("thread composer renders a labeled focused border and placeholder", () => {
       projectName="bb-tui"
       timelineLength={2}
       conversationLive={0}
-      detailLines={["U: Improve the UI", "A: Inspecting the render"]}
+      detailLines={[line("› Improve the UI"), line("Inspecting the render")]}
       scrollUp={0}
       inputRows={[""]}
       focus="detail"
@@ -142,7 +145,7 @@ test("workspace renders shortcuts below both pane borders", () => {
         projectName: "bb-tui",
         timelineLength: 2,
         conversationLive: 0,
-        detailLines: ["U: Improve the UI"],
+        detailLines: [line("› Improve the UI")],
         scrollUp: 0,
         inputRows: [""],
         focus: "detail",
@@ -173,7 +176,7 @@ test("compact workspace renders only the focused detail pane", () => {
         projectName: "bb-tui",
         timelineLength: 2,
         conversationLive: 0,
-        detailLines: ["DETAIL CONTENT"],
+        detailLines: [line("DETAIL CONTENT")],
         scrollUp: 0,
         inputRows: [""],
         focus: "detail",
@@ -208,7 +211,7 @@ test("detail footer keeps the quit shortcut visible at 80 columns", () => {
         projectName: "bb-tui",
         timelineLength: 2,
         conversationLive: 0,
-        detailLines: ["DETAIL CONTENT"],
+        detailLines: [line("DETAIL CONTENT")],
         scrollUp: 0,
         inputRows: [""],
         focus: "detail",

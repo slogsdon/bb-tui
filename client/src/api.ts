@@ -4,8 +4,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { TranscriptBlock } from "./markdown.js";
 
 const execFileP = promisify(execFile);
+
+export type { TranscriptBlock };
 
 export interface ClientPrefs {
   hideReasoning: boolean;
@@ -258,8 +261,11 @@ export function eventActivityLabel(e: BufferedEvent): string | null {
   }
 }
 
-/** Extract readable lines from a timeline row (recursive). */
-export function timelineLines(row: unknown, acc: string[] = []): string[] {
+/** Flatten a timeline row into role-tagged transcript blocks (recursive).
+ * Blocks keep their raw markdown — the renderer, not this layer, decides how
+ * text is styled and wrapped. Tool/work rows carry their nesting depth so the
+ * pane can draw them as children of the call that produced them. */
+export function timelineBlocks(row: unknown, acc: TranscriptBlock[] = [], depth = 0): TranscriptBlock[] {
   const r = row as {
     kind?: string;
     role?: string;
@@ -270,16 +276,19 @@ export function timelineLines(row: unknown, acc: string[] = []): string[] {
   };
   if (r == null || typeof r !== "object") return acc;
   if (r.kind === "conversation") {
-    const tag = r.role === "user" ? "U" : r.role === "assistant" ? "A" : "S";
-    acc.push(`${tag}: ${r.text ?? ""}`);
+    const role = r.role === "user" ? "user" : r.role === "assistant" ? "agent" : "system";
+    if ((r.text ?? "").trim()) acc.push({ role, text: r.text ?? "" });
   } else if (r.kind === "turn") {
-    acc.push(`— turn ${r.summary ? r.summary.slice(0, 200) : ""}`);
+    // A turn boundary with nothing to say needs no row; blocks are already
+    // separated by a blank line.
+    if (r.summary) acc.push({ role: "system", text: r.summary });
   } else if (typeof r.summary === "string" && r.summary) {
-    acc.push(`[${r.kind ?? "work"}] ${r.summary.slice(0, 200)}`);
+    acc.push({ role: "work", text: r.summary, depth });
   } else if (r.error) {
-    acc.push(`[error] ${r.error}`);
+    acc.push({ role: "system", text: `error: ${r.error}` });
   }
-  for (const c of r.children ?? []) timelineLines(c, acc);
+  const childDepth = r.kind === "conversation" || r.kind === "turn" ? 0 : depth + 1;
+  for (const c of r.children ?? []) timelineBlocks(c, acc, childDepth);
   return acc;
 }
 

@@ -21,7 +21,7 @@ import {
   stopThread,
   tellThread,
   threadShow,
-  timelineLines,
+  timelineBlocks,
   type BufferedEvent,
   type ClientInfo,
   type EventsPage,
@@ -29,6 +29,7 @@ import {
   type ThreadRow,
 } from "./api.js";
 import { calculatePaneLayout, WorkspaceLayout } from "./layout.js";
+import { renderBlocks, type TranscriptBlock } from "./markdown.js";
 import { enterAlternateScreen } from "./terminal.js";
 
 type View =
@@ -38,8 +39,11 @@ type View =
   | { kind: "model"; thread: ThreadRow };
 
 const MAX_TAIL = 600;
-const MAX_TRANSCRIPT_CHARS = 600;
+// Per-item cap on assembled streaming text. Generous because the pane already
+// windows what it draws — this exists to bound memory, not to shorten messages.
+const MAX_TRANSCRIPT_CHARS = 20_000;
 const MAX_INPUT_ROWS = 3;
+const MAX_TRANSCRIPT_BLOCKS = 200;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
 
@@ -55,7 +59,8 @@ function transformInput(prev: string, data: string): string {
   return s;
 }
 
-/** Word-wrap a line to width (continuation lines indented two spaces). */
+/** Word-wrap the composer input to width. Transcript text goes through
+ * renderBlocks instead — it needs styling and hanging indents this cannot do. */
 function wrapToWidth(text: string, width: number): string[] {
   const w = Math.max(8, width);
   const words = text.split(/\s+/).filter(Boolean);
@@ -101,7 +106,7 @@ export default function App() {
   const [view, setView] = useState<View>({ kind: "home" });
   const [focus, setFocus] = useState<"list" | "detail">("list");
   const [tail, setTail] = useState<BufferedEvent[]>([]);
-  const [timeline, setTimeline] = useState<string[]>([]);
+  const [timeline, setTimeline] = useState<TranscriptBlock[]>([]);
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting…");
@@ -204,7 +209,7 @@ export default function App() {
           lastTimelineRefreshRef.current = now;
           try {
             const { items } = await getTimeline(info, focusId);
-            setTimeline(items.flatMap((i) => timelineLines(i)).slice(-120));
+            setTimeline(items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
           } catch {
             // non-fatal; next cycle retries
           }
@@ -286,7 +291,7 @@ export default function App() {
     setStatus(`opening ${t.id}`);
     try {
       const { items } = await getTimeline(info!, t.id);
-      setTimeline(items.flatMap((i) => timelineLines(i)).slice(-120));
+      setTimeline(items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
       assembleTranscripts(evs);
       setStatus(`${t.providerId} · ${t.status}`);
@@ -304,9 +309,8 @@ export default function App() {
 
   function appendUserMsg(threadId: string, text: string) {
     const list = userMsgsRef.current.get(threadId) ?? [];
-    const line = `U: ${text}`;
-    if (list[list.length - 1] !== line) {
-      userMsgsRef.current.set(threadId, [...list.slice(-60), line]);
+    if (list[list.length - 1] !== text) {
+      userMsgsRef.current.set(threadId, [...list.slice(-60), text]);
     }
   }
 
@@ -463,18 +467,25 @@ export default function App() {
   );
 
   const conversation = useMemo(() => {
-    if (view.kind !== "detail") return { lines: [] as string[], live: 0 };
+    if (view.kind !== "detail") return { blocks: [] as TranscriptBlock[], live: 0 };
     const prefix = `${view.thread.id}::`;
-    const agent = [...transcriptsRef.current.entries()]
-      .filter(([k, text]) => k.startsWith(prefix) && text.length > 0)
-      .map(([, text]) => `A: ${text.replace(/\n/g, " ").trim()}`);
+    // Newlines are load-bearing: they carry the markdown block structure the
+    // renderer needs. Only trim the edges.
+    const agent: TranscriptBlock[] = [...transcriptsRef.current.entries()]
+      .filter(([k, text]) => k.startsWith(prefix) && text.trim().length > 0)
+      .map(([, text]) => ({ role: "agent" as const, text: text.trim() }));
     if (!hideReasoning) {
       for (const [k, text] of reasoningRef.current.entries()) {
-        if (k.startsWith(prefix) && text.length > 0) agent.push(`💭 ${text.replace(/\n/g, " ").trim()}`);
+        if (k.startsWith(prefix) && text.trim().length > 0) {
+          agent.push({ role: "reasoning", text: text.trim() });
+        }
       }
     }
-    const users = (userMsgsRef.current.get(view.thread.id) ?? []).filter((l) => !timeline.includes(l));
-    return { lines: [...timeline, ...users, ...agent], live: focusedEvents.length };
+    const sent = new Set(timeline.filter((b) => b.role === "user").map((b) => b.text));
+    const users: TranscriptBlock[] = (userMsgsRef.current.get(view.thread.id) ?? [])
+      .filter((text) => !sent.has(text))
+      .map((text) => ({ role: "user" as const, text }));
+    return { blocks: [...timeline, ...users, ...agent], live: focusedEvents.length };
   }, [timeline, focusedEvents, hideReasoning, view]);
 
   // Latest meaningful activity per thread (content, not raw event names).
@@ -496,7 +507,7 @@ export default function App() {
   }, [input, detailInnerW]);
 
   const detailLines = useMemo(
-    () => (view.kind === "detail" ? conversation.lines.flatMap((l) => wrapToWidth(l, detailInnerW)) : []),
+    () => (view.kind === "detail" ? renderBlocks(conversation.blocks, detailInnerW) : []),
     [conversation, detailInnerW, view],
   );
 

@@ -1,6 +1,7 @@
 import React, { type ReactNode } from "react";
 import { Box, Text } from "ink";
 import type { ThreadRow } from "./api.js";
+import type { MdLine } from "./markdown.js";
 
 export type PaneFocus = "list" | "detail";
 
@@ -88,7 +89,7 @@ export type ThreadPaneProps = {
   projectName: string;
   timelineLength: number;
   conversationLive: number;
-  detailLines: string[];
+  detailLines: MdLine[];
   scrollUp: number;
   inputRows: string[];
   focus: PaneFocus;
@@ -124,13 +125,20 @@ export function ThreadPane(props: ThreadPaneProps) {
         {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
         {visible.map((line, index) => (
           <Text key={from + index} wrap="truncate">
-            {line.startsWith("U: ") ? (
-              <Text color="blue">{line}</Text>
-            ) : line.startsWith("A: ") ? (
-              <Text color="green">{line}</Text>
-            ) : (
-              <Text dimColor={line.startsWith("—") || line.startsWith("💭")}>{line}</Text>
-            )}
+            {/* A blank block separator still has to occupy a row. */}
+            {line.spans.length === 0
+              ? " "
+              : line.spans.map((span, spanIndex) => (
+                  <Text
+                    key={spanIndex}
+                    bold={span.bold}
+                    italic={span.italic}
+                    dimColor={span.dim}
+                    color={span.color}
+                  >
+                    {span.text}
+                  </Text>
+                ))}
           </Text>
         ))}
       </Box>

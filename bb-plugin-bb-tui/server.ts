@@ -45,7 +45,19 @@ const rpcContract = defineRpcContract({
   },
   getTimeline: {
     input: z.object({ threadId: z.string() }).strict(),
-    output: z.object({ items: z.array(z.unknown()), nextTs: z.number().optional() }),
+    output: z.object({
+      items: z.array(z.unknown()),
+      nextTs: z.number().optional(),
+      // Plan mode is the provider's state, not a bb setting: bb reports it and
+      // can cancel it, but nothing client-side can enter it.
+      planMode: z.object({ prompt: z.string() }).nullable().optional(),
+      // Execution options the thread's next turn will use. Absent from the
+      // thread row; this resolver is the only place they exist.
+      execution: z
+        .object({ model: z.string(), permissionMode: z.string(), reasoningLevel: z.string() })
+        .nullable()
+        .optional(),
+    }),
   },
   eventsSince: {
     input: z
@@ -253,8 +265,24 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     async getTimeline({ threadId }) {
-      const res = await bb.sdk.threads.timeline({ threadId });
-      return { items: res.rows as unknown[] };
+      // Both ride the timeline call the client already polls, so plan mode and
+      // the execution options cost no extra round trip.
+      const [res, exec] = await Promise.all([
+        bb.sdk.threads.timeline({ threadId }),
+        bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null),
+      ]);
+      const plan = res.activePromptMode;
+      return {
+        items: res.rows as unknown[],
+        planMode: plan ? { prompt: plan.prompt } : null,
+        execution: exec
+          ? {
+              model: exec.model,
+              permissionMode: exec.permissionMode,
+              reasoningLevel: exec.reasoningLevel,
+            }
+          : null,
+      };
     },
 
     eventsSince({ afterSeq, limit, threadId }) {

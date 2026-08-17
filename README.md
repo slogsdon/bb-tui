@@ -18,7 +18,8 @@ A terminal UI around the bb ecosystem. **Phase 1 spike complete** — see
   columns; contextual shortcuts below pane borders; `tab` switches focus;
   `←/→` folds a project; `/` filters by thread or project title; right-aligned
   branch/machine column (live activity while a thread runs); composer context
-  line (project · machine · branch · provider · turn elapsed); per-thread
+  line (project · machine · branch · model · permission mode · turn elapsed);
+  a plan-mode banner while the provider is planning; per-thread
   cursors; archived threads excluded; discovery cached; status refreshes
   event-gated. See [Keys](#keys).
   Set `BB_TUI_DEBUG=1` to append buffer counters to the context line.
@@ -99,11 +100,19 @@ menu of bb commands and the skills bb knows about, matching bb.app.
 | `enter`, `tab` | accept the highlighted entry |
 | `esc` | dismiss the menu (a second `esc` leaves the composer) |
 
-A message that *is* `/compact` runs the bb thread operation, the same one the
-app composer produces — `bb thread tell` is raw and would send the literal
-string. Everything else passes through untouched: skills are resolved by the
-agent, and provider commands the TUI has never heard of still work. `//` sends
-a literal leading slash.
+A message that *is* `/compact` or `/cancel-plan` runs the bb thread operation,
+the same one the app composer produces — `bb thread tell` is raw and would send
+the literal string. Everything else passes through untouched: skills are
+resolved by the agent, and provider commands the TUI has never heard of still
+work. `//` sends a literal leading slash.
+
+`/plan` is deliberately *not* a bb command. Plan mode is the provider's state,
+not a bb setting: the only client-settable permission modes are `accept-edits`,
+`auto`, and `full`, and plan travels in a separate host-to-provider field
+(`claudeCodePermissionMode`) that no plugin or CLI surface can write. So `/plan`
+reaches the agent as text and the agent enters plan mode itself. bb exposes the
+other half — `bb thread cancel-plan` — and the timeline reports the state, so
+the TUI shows a banner and offers `/cancel-plan` to leave.
 
 In the composer `q` is an ordinary character — use `esc` then `q` to quit. Two
 actions lose their mnemonic to the terminal rather than to preference: `ctrl-m`

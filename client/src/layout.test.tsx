@@ -246,6 +246,47 @@ test("the context row carries where the thread runs, not debug counters", () => 
   assert.ok(!parts.some((p) => p.includes("seq")));
 });
 
+test("the model and permission mode replace the provider once bb reports them", () => {
+  const parts = contextRow({
+    thread: { ...sampleThread, status: "idle" },
+    projectName: "bb-tui",
+    hostNames: new Map(),
+    detailLines: [],
+    scrollUp: 0,
+    composer: emptyComposer,
+    focus: "detail",
+    elapsedSeconds: null,
+    execution: { model: "claude-opus-5[1m]", permissionMode: "auto", reasoningLevel: "medium" },
+    width: 80,
+    height: 24,
+  });
+
+  assert.deepEqual(parts, ["bb-tui", "claude-opus-5[1m]", "perm auto", "idle"]);
+  // The provider id is implied by the model, so it does not also take a slot.
+  assert.ok(!parts.includes("codex"));
+});
+
+test("a thread in plan mode says so and names the way out", () => {
+  const frame = renderFrame(
+    <ThreadPane
+      thread={sampleThread}
+      projectName="bb-tui"
+      hostNames={new Map()}
+      detailLines={[]}
+      scrollUp={0}
+      composer={emptyComposer}
+      focus="detail"
+      elapsedSeconds={null}
+      planMode={{ prompt: "Research the parser first" }}
+      width={80}
+      height={24}
+    />,
+  );
+
+  assert.match(frame, /plan mode/);
+  assert.match(frame, /\/cancel-plan/);
+});
+
 test("debug counters appear only when explicitly requested", () => {
   const parts = contextRow({
     thread: { ...sampleThread, status: "idle" },

@@ -1,6 +1,6 @@
 import React, { type ReactNode } from "react";
 import { Box, Text } from "ink";
-import type { ThreadRow } from "./api.js";
+import type { Execution, ThreadRow } from "./api.js";
 import type { MdLine } from "./markdown.js";
 import type { ComposerLayout } from "./composer.js";
 import type { CatalogEntry } from "./commands.js";
@@ -143,14 +143,19 @@ export type ThreadPaneProps = {
   focus: PaneFocus;
   /** Seconds the current turn has been running, when one is. */
   elapsedSeconds: number | null;
+  /** Execution options for the next turn, once the timeline has reported them. */
+  execution?: Execution | null;
+  /** Set while the provider is in plan mode. */
+  planMode?: { prompt: string } | null;
   /** Debug counters, shown only when BB_TUI_DEBUG is set. */
   debug?: { timelineLength: number; conversationLive: number; cursorSeq: number };
   width: number;
   height: number;
 };
 
-/** The composer context line: project, machine, branch, provider, and what the
- * thread is doing right now. Empty parts are dropped rather than shown blank. */
+/** The composer context line: project, machine, branch, model, permission mode,
+ * and what the thread is doing right now. Empty parts are dropped rather than
+ * shown blank. */
 export function contextRow(props: ThreadPaneProps): string[] {
   const thread = props.thread;
   const running = thread.status === "active" || thread.status === "starting";
@@ -158,7 +163,10 @@ export function contextRow(props: ThreadPaneProps): string[] {
     props.projectName,
     props.hostNames.get(thread.environmentHostId ?? "") ?? "",
     thread.environmentBranchName ?? "",
-    thread.providerId,
+    // The model is the more specific fact and implies the provider, so it takes
+    // the slot rather than adding one. Provider stands in until it arrives.
+    props.execution?.model ?? thread.providerId,
+    props.execution ? `perm ${props.execution.permissionMode}` : "",
     running && props.elapsedSeconds !== null
       ? `working ${props.elapsedSeconds}s · esc to interrupt`
       : thread.status,
@@ -234,7 +242,8 @@ export function ThreadPane(props: ThreadPaneProps) {
   // The pane has fixed geometry, so the menu takes its rows from the transcript
   // rather than overlaying it.
   const menuRows = menuHeight(props.menu);
-  const visibleCount = Math.max(3, props.height - 10 - menuRows);
+  const planRows = props.planMode ? 1 : 0;
+  const visibleCount = Math.max(3, props.height - 10 - menuRows - planRows);
   const scrollable = Math.max(0, props.detailLines.length - visibleCount);
   const clamped = Math.min(props.scrollUp, scrollable);
   const from = Math.max(0, props.detailLines.length - visibleCount - clamped);
@@ -272,15 +281,19 @@ export function ThreadPane(props: ThreadPaneProps) {
           </Text>
         ))}
       </Box>
-      {/* Context, not counters: where this thread runs and what it is doing.
-          Model and permission mode are deliberately absent — bb does not expose
-          them on the thread row, and a guessed value is worse than none. */}
+      {/* Context, not counters: where this thread runs and what it is doing. */}
       <Text dimColor wrap="truncate">
         {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`}
         {contextRow(props).map((part) => ` · ${part}`)}
         {props.thread.hasPendingInteraction ? " · " : ""}
         {props.thread.hasPendingInteraction ? <Text color="yellow">needs you</Text> : ""}
       </Text>
+      {props.planMode && (
+        <Text wrap="truncate">
+          <Text color="yellow">▍plan mode</Text>
+          <Text dimColor> · /cancel-plan to exit</Text>
+        </Text>
+      )}
       {props.menu && menuRows > 0 && <SlashMenu menu={props.menu} width={props.width - 4} />}
       <Box
         flexDirection="column"

@@ -14,7 +14,7 @@
 
 /** Commands bb resolves client-side and that `bb thread tell` cannot express.
  * Everything else — skills, provider commands — is passthrough. */
-export const BB_COMMAND_NAMES = ["compact"] as const;
+export const BB_COMMAND_NAMES = ["compact", "cancel-plan"] as const;
 
 export type Resolution =
   | { kind: "command"; name: string; args: string }
@@ -42,6 +42,7 @@ export type CatalogEntry = {
 
 const COMMAND_ENTRIES: CatalogEntry[] = [
   { kind: "command", name: "compact", description: "Compact context" },
+  { kind: "command", name: "cancel-plan", description: "Exit plan mode" },
 ];
 
 /** Merge bb commands with the skills bb knows about. Users do not care which

@@ -146,7 +146,24 @@ export function listThreads(info: ClientInfo, projectId?: string, limit = 100): 
   return rpc(info.serverUrl, "listThreads", { projectId, limit });
 }
 
-export function getTimeline(info: ClientInfo, threadId: string): Promise<{ items: unknown[] }> {
+/** Execution options the thread's next turn will use. bb resolves these from
+ * the last turn request, the sticky thread setting, and the project default —
+ * so this is the only honest source for what the model actually is. */
+export interface Execution {
+  model: string;
+  permissionMode: string;
+  reasoningLevel: string;
+}
+
+export interface Timeline {
+  items: unknown[];
+  /** Non-null while the provider is in plan mode. Entering it is the agent's
+   * move, not bb's — `bb thread cancel-plan` is the only side bb exposes. */
+  planMode?: { prompt: string } | null;
+  execution?: Execution | null;
+}
+
+export function getTimeline(info: ClientInfo, threadId: string): Promise<Timeline> {
   return rpc(info.serverUrl, "getTimeline", { threadId });
 }
 
@@ -231,6 +248,10 @@ export function stopThread(threadId: string): Promise<unknown> {
 
 export function compactThread(threadId: string): Promise<unknown> {
   return bbJson(["thread", "compact", threadId]);
+}
+
+export function cancelPlan(threadId: string): Promise<unknown> {
+  return bbJson(["thread", "cancel-plan", threadId]);
 }
 
 export function setThreadModel(threadId: string, model: string): Promise<unknown> {

@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
+  cancelPlan,
   compactThread,
   discover,
   eventActivityLabel,
@@ -27,6 +28,7 @@ import {
   type BufferedEvent,
   type ClientInfo,
   type EventsPage,
+  type Execution,
   type Project,
   type ThreadRow,
 } from "./api.js";
@@ -122,6 +124,8 @@ export default function App() {
   const [focus, setFocus] = useState<"list" | "detail">("list");
   const [tail, setTail] = useState<BufferedEvent[]>([]);
   const [timeline, setTimeline] = useState<TranscriptBlock[]>([]);
+  const [execution, setExecution] = useState<Execution | null>(null);
+  const [planMode, setPlanMode] = useState<{ prompt: string } | null>(null);
   const [composer, setComposer] = useState<Composer>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting…");
@@ -283,8 +287,10 @@ export default function App() {
         if (focusId && now - lastTimelineRefreshRef.current > 4000) {
           lastTimelineRefreshRef.current = now;
           try {
-            const { items } = await getTimeline(info, focusId);
-            setTimeline(items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+            const tl = await getTimeline(info, focusId);
+            setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+            setExecution(tl.execution ?? null);
+            setPlanMode(tl.planMode ?? null);
           } catch {
             // non-fatal; next cycle retries
           }
@@ -374,6 +380,8 @@ export default function App() {
     setView({ kind: "detail", thread: snapshot });
     setFocus("detail");
     setTimeline([]);
+    setExecution(null);
+    setPlanMode(null);
     setComposer(EMPTY);
     setScrollUp(0);
     setStatus(`opening ${t.id}`);
@@ -382,8 +390,10 @@ export default function App() {
       .then((skills) => setCatalog(buildCatalog(skills)))
       .catch(() => setCatalog(buildCatalog([])));
     try {
-      const { items } = await getTimeline(info!, t.id);
-      setTimeline(items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+      const tl = await getTimeline(info!, t.id);
+      setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+      setExecution(tl.execution ?? null);
+      setPlanMode(tl.planMode ?? null);
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
       assembleTranscripts(evs);
       setStatus(`${t.providerId} · ${t.status}`);
@@ -396,6 +406,7 @@ export default function App() {
    * serves rather than inside it, so the table stays data. */
   function runBbCommand(name: string, threadId: string): Promise<unknown> {
     if (name === "compact") return compactThread(threadId);
+    if (name === "cancel-plan") return cancelPlan(threadId);
     return Promise.reject(new Error(`no bb implementation for /${name}`));
   }
 
@@ -873,6 +884,8 @@ export default function App() {
               menu: menuOpen ? { entries: menuMatches, selected: menuSel } : undefined,
               focus,
               elapsedSeconds,
+              execution,
+              planMode,
               debug: process.env.BB_TUI_DEBUG
                 ? {
                     timelineLength: timeline.length,

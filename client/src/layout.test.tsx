@@ -6,8 +6,10 @@ import { render } from "ink";
 import type { ThreadRow } from "./api.js";
 import {
   calculatePaneLayout,
+  contextRow,
   ThreadListPane,
   ThreadPane,
+  threadMeta,
   WorkspaceLayout,
 } from "./layout.js";
 
@@ -95,6 +97,7 @@ test("thread list renders status and title without provider identifiers", () => 
       firstVisible={0}
       visibleCount={1}
       activityByThread={new Map()}
+      hostNames={new Map()}
       width={36}
       height={12}
     />,
@@ -116,6 +119,7 @@ test("project rows show a fold marker and their thread count", () => {
       firstVisible={0}
       visibleCount={3}
       activityByThread={new Map()}
+      hostNames={new Map()}
       width={36}
       height={12}
     />,
@@ -138,6 +142,7 @@ test("the overflow count reflects the scroll position, not the list length", () 
       firstVisible={0}
       visibleCount={4}
       activityByThread={new Map()}
+      hostNames={new Map()}
       width={36}
       height={12}
     />,
@@ -149,6 +154,7 @@ test("the overflow count reflects the scroll position, not the list length", () 
       firstVisible={6}
       visibleCount={4}
       activityByThread={new Map()}
+      hostNames={new Map()}
       width={36}
       height={12}
     />,
@@ -158,18 +164,95 @@ test("the overflow count reflects the scroll position, not the list length", () 
   assert.doesNotMatch(atBottom, /more/);
 });
 
+test("row metadata prefers the branch and strips generated worktree noise", () => {
+  const hosts = new Map([["host_1", "mac-mini"]]);
+  assert.equal(
+    threadMeta({ ...sampleThread, environmentBranchName: "bb/improve-thread-view-thr_kud5sfwmaq" }, hosts),
+    "improve-thread-view",
+  );
+  assert.equal(threadMeta({ ...sampleThread, environmentBranchName: "main" }, hosts), "main");
+  assert.equal(threadMeta({ ...sampleThread, environmentHostId: "host_1" }, hosts), "mac-mini");
+  assert.equal(threadMeta(sampleThread, hosts), "");
+});
+
+test("settled threads show metadata while running threads show live activity", () => {
+  const idle = renderFrame(
+    <ThreadListPane
+      rows={[{ kind: "thread", thread: { ...sampleThread, status: "idle", environmentBranchName: "main" } }]}
+      selectedIndex={0}
+      firstVisible={0}
+      visibleCount={1}
+      activityByThread={new Map([["thr_ui", "writing tests"]])}
+      hostNames={new Map()}
+      width={44}
+      height={12}
+    />,
+  );
+  const running = renderFrame(
+    <ThreadListPane
+      rows={[{ kind: "thread", thread: { ...sampleThread, environmentBranchName: "main" } }]}
+      selectedIndex={0}
+      firstVisible={0}
+      visibleCount={1}
+      activityByThread={new Map([["thr_ui", "writing tests"]])}
+      hostNames={new Map()}
+      width={44}
+      height={12}
+    />,
+  );
+
+  assert.match(idle, /main/);
+  assert.doesNotMatch(idle, /writing tests/);
+  assert.match(running, /writing tests/);
+});
+
+test("the context row carries where the thread runs, not debug counters", () => {
+  const parts = contextRow({
+    thread: { ...sampleThread, environmentHostId: "host_1", environmentBranchName: "main" },
+    projectName: "bb-tui",
+    hostNames: new Map([["host_1", "mac-mini"]]),
+    detailLines: [],
+    scrollUp: 0,
+    inputRows: [""],
+    focus: "detail",
+    elapsedSeconds: 18,
+    width: 80,
+    height: 24,
+  });
+
+  assert.deepEqual(parts, ["bb-tui", "mac-mini", "main", "codex", "working 18s · esc to interrupt"]);
+  assert.ok(!parts.some((p) => p.includes("seq")));
+});
+
+test("debug counters appear only when explicitly requested", () => {
+  const parts = contextRow({
+    thread: { ...sampleThread, status: "idle" },
+    projectName: "bb-tui",
+    hostNames: new Map(),
+    detailLines: [],
+    scrollUp: 0,
+    inputRows: [""],
+    focus: "detail",
+    elapsedSeconds: null,
+    debug: { timelineLength: 10, conversationLive: 0, cursorSeq: 42 },
+    width: 80,
+    height: 24,
+  });
+
+  assert.deepEqual(parts, ["bb-tui", "codex", "idle", "history 10", "live 0", "seq 42"]);
+});
+
 test("thread composer renders a labeled focused border and placeholder", () => {
   const frame = renderFrame(
     <ThreadPane
       thread={sampleThread}
       projectName="bb-tui"
-      timelineLength={2}
-      conversationLive={0}
+      elapsedSeconds={null}
+      hostNames={new Map()}
       detailLines={[line("› Improve the UI"), line("Inspecting the render")]}
       scrollUp={0}
       inputRows={[""]}
       focus="detail"
-      cursorSeq={42}
       width={83}
       height={36}
     />,
@@ -193,17 +276,17 @@ test("workspace renders shortcuts below both pane borders", () => {
         firstVisible: 0,
         visibleCount: 1,
         activityByThread: new Map(),
+        hostNames: new Map(),
       }}
       detail={{
         thread: sampleThread,
         projectName: "bb-tui",
-        timelineLength: 2,
-        conversationLive: 0,
+        elapsedSeconds: null,
+        hostNames: new Map(),
         detailLines: [line("› Improve the UI")],
         scrollUp: 0,
         inputRows: [""],
         focus: "detail",
-        cursorSeq: 42,
       }}
     />,
   );
@@ -224,17 +307,17 @@ test("compact workspace renders only the focused detail pane", () => {
         firstVisible: 0,
         visibleCount: 1,
         activityByThread: new Map(),
+        hostNames: new Map(),
       }}
       detail={{
         thread: sampleThread,
         projectName: "bb-tui",
-        timelineLength: 2,
-        conversationLive: 0,
+        elapsedSeconds: null,
+        hostNames: new Map(),
         detailLines: [line("DETAIL CONTENT")],
         scrollUp: 0,
         inputRows: [""],
         focus: "detail",
-        cursorSeq: 42,
       }}
     />,
     60,
@@ -259,17 +342,17 @@ test("detail footer keeps the quit shortcut visible at 80 columns", () => {
         firstVisible: 0,
         visibleCount: 1,
         activityByThread: new Map(),
+        hostNames: new Map(),
       }}
       detail={{
         thread: sampleThread,
         projectName: "bb-tui",
-        timelineLength: 2,
-        conversationLive: 0,
+        elapsedSeconds: null,
+        hostNames: new Map(),
         detailLines: [line("DETAIL CONTENT")],
         scrollUp: 0,
         inputRows: [""],
         focus: "detail",
-        cursorSeq: 42,
       }}
     />,
     80,

@@ -11,6 +11,7 @@ import {
   eventActivityLabel,
   eventsSince,
   getTimeline,
+  listMachines,
   listProjects,
   listThreads,
   loadCursor,
@@ -112,8 +113,11 @@ export default function App() {
   const [status, setStatus] = useState("connecting…");
   const [hideReasoning, setHideReasoning] = useState(true);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [hostNames, setHostNames] = useState<Map<string, string>>(new Map());
   const [filter, setFilter] = useState("");
   const [filtering, setFiltering] = useState(false);
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  const [clockTick, setClockTick] = useState(0);
   const [scrollUp, setScrollUp] = useState(0);
   const [modelHints, setModelHints] = useState<string[]>([]);
 
@@ -151,6 +155,13 @@ export default function App() {
         setSpawnProject(personal?.id ?? order[0]);
         const { threads } = await listThreads(info, undefined, 200);
         setThreads(sortThreads(threads.filter((t) => !t.archivedAt)));
+        // Thread rows carry a host id, not a host name; resolve once.
+        try {
+          const machines = await listMachines();
+          setHostNames(new Map(machines.map((m) => [m.id, m.name])));
+        } catch {
+          // non-fatal: rows fall back to showing no machine
+        }
       } catch (err) {
         setError(String(err));
         setStatus("failed");
@@ -198,6 +209,12 @@ export default function App() {
           tailRef.current = next;
           setTail(next);
           assembleTranscripts(fresh);
+          // Turn clock for the open thread: how long has it been working.
+          for (const e of fresh) {
+            if (focusId && e.threadId !== focusId) continue;
+            if (e.type === "turn/started") setTurnStartedAt(e.ts || Date.now());
+            else if (e.type === "turn/completed") setTurnStartedAt(null);
+          }
           // Status row refreshes only on status-relevant events, throttled.
           const hasStatus = fresh.some((e) => STATUS_EVENTS.has(e.type));
           if (hasStatus && Date.now() - lastStatusRefreshRef.current > 2000) {
@@ -223,6 +240,19 @@ export default function App() {
     }, pollMsRef.current);
     return () => clearInterval(t);
   }, [info]);
+
+  // A running turn needs a second hand, and nothing else re-renders between
+  // events. Only ticks while a turn is actually open.
+  useEffect(() => {
+    if (turnStartedAt === null) return;
+    const t = setInterval(() => setClockTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [turnStartedAt]);
+
+  const elapsedSeconds = useMemo(
+    () => (turnStartedAt === null ? null : Math.max(0, Math.round((Date.now() - turnStartedAt) / 1000))),
+    [turnStartedAt, clockTick],
+  );
 
   function assembleTranscripts(events: BufferedEvent[]) {
     for (const e of events) {
@@ -698,19 +728,26 @@ export default function App() {
         firstVisible,
         visibleCount,
         activityByThread: byThread,
+        hostNames,
       }}
       detail={
         view.kind === "detail"
           ? {
               thread: view.thread,
               projectName: projects.get(view.thread.projectId) ?? view.thread.projectId,
-              timelineLength: timeline.length,
-              conversationLive: conversation.live,
+              hostNames,
               detailLines,
               scrollUp,
               inputRows,
               focus,
-              cursorSeq: cursorRef.current,
+              elapsedSeconds,
+              debug: process.env.BB_TUI_DEBUG
+                ? {
+                    timelineLength: timeline.length,
+                    conversationLive: conversation.live,
+                    cursorSeq: cursorRef.current,
+                  }
+                : undefined,
             }
           : undefined
       }

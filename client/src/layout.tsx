@@ -51,9 +51,20 @@ export type ThreadListPaneProps = {
   firstVisible: number;
   visibleCount: number;
   activityByThread: Map<string, string>;
+  hostNames: Map<string, string>;
   width: number;
   height: number;
 };
+
+/** Stable per-thread metadata for the right-hand column: the branch it works on,
+ * or the machine it runs on when the branch says nothing. Generated worktree
+ * branches carry the thread id as a suffix — drop it, it is already the row. */
+export function threadMeta(thread: ThreadRow, hostNames: Map<string, string>): string {
+  const branch = thread.environmentBranchName ?? "";
+  if (branch) return branch.replace(/-?thr_[a-z0-9]+$/i, "").replace(/^bb\//, "");
+  const host = thread.environmentHostId ?? "";
+  return hostNames.get(host) ?? "";
+}
 
 /** Render the thread navigator: threads grouped under their project, without
  * provider labels. */
@@ -78,20 +89,27 @@ export function ThreadListPane(props: ThreadListPaneProps) {
 
         const thread = row.thread;
         const status = STATUS_STYLE[thread.status] ?? STATUS_STYLE.idle!;
-        const marker = props.activityByThread.get(thread.id);
-        const markerWidth = marker ? Math.min(14, Math.max(8, Math.floor(props.width * 0.25))) : 0;
-        const titleWidth = Math.max(8, props.width - 8 - markerWidth);
+        const running = thread.status === "active" || thread.status === "starting";
+        // A running thread's live activity is the useful thing to show; a settled
+        // one's is a stale fragment, so it yields to stable metadata you can
+        // actually scan by (which branch / which machine).
+        const meta = running ? props.activityByThread.get(thread.id) : threadMeta(thread, props.hostNames);
+        const metaWidth = meta ? Math.min(22, Math.max(8, Math.floor(props.width * 0.3))) : 0;
+        const titleWidth = Math.max(8, props.width - 8 - metaWidth);
         const title = (thread.title ?? thread.titleFallback ?? thread.id).slice(0, titleWidth);
+        const shown = meta ? meta.slice(0, metaWidth) : "";
+        // Flush the metadata right so the column reads as a column.
+        const gap = Math.max(1, titleWidth - title.length + (metaWidth - shown.length) + 1);
 
         return (
           <Text key={thread.id} color={selected ? "green" : undefined} wrap="truncate">
             {selected ? "› " : "  "}
             {thread.pinnedAt ? "◆" : " "}
             <Text color={status.color}>{status.glyph}</Text> {title}
-            {marker && (
+            {shown !== "" && (
               <Text dimColor>
-                {" "}
-                {marker.slice(0, markerWidth)}
+                {" ".repeat(gap)}
+                {shown}
               </Text>
             )}
           </Text>
@@ -105,16 +123,42 @@ export function ThreadListPane(props: ThreadListPaneProps) {
 export type ThreadPaneProps = {
   thread: ThreadRow;
   projectName: string;
-  timelineLength: number;
-  conversationLive: number;
+  hostNames: Map<string, string>;
   detailLines: MdLine[];
   scrollUp: number;
   inputRows: string[];
   focus: PaneFocus;
-  cursorSeq: number;
+  /** Seconds the current turn has been running, when one is. */
+  elapsedSeconds: number | null;
+  /** Debug counters, shown only when BB_TUI_DEBUG is set. */
+  debug?: { timelineLength: number; conversationLive: number; cursorSeq: number };
   width: number;
   height: number;
 };
+
+/** The composer context line: project, machine, branch, provider, and what the
+ * thread is doing right now. Empty parts are dropped rather than shown blank. */
+export function contextRow(props: ThreadPaneProps): string[] {
+  const thread = props.thread;
+  const running = thread.status === "active" || thread.status === "starting";
+  const parts = [
+    props.projectName,
+    props.hostNames.get(thread.environmentHostId ?? "") ?? "",
+    thread.environmentBranchName ?? "",
+    thread.providerId,
+    running && props.elapsedSeconds !== null
+      ? `working ${props.elapsedSeconds}s · esc to interrupt`
+      : thread.status,
+  ];
+  if (props.debug) {
+    parts.push(
+      `history ${props.debug.timelineLength}`,
+      `live ${props.debug.conversationLive}`,
+      `seq ${props.debug.cursorSeq}`,
+    );
+  }
+  return parts.filter((p) => p !== "");
+}
 
 /** Render thread history and a fixed-height, visually distinct composer. */
 export function ThreadPane(props: ThreadPaneProps) {
@@ -129,15 +173,12 @@ export function ThreadPane(props: ThreadPaneProps) {
 
   return (
     <Box flexDirection="column" width={props.width} height={props.height} borderStyle="round" overflow="hidden">
+      {/* Title only — the context line below the transcript carries the rest. */}
       <Text wrap="truncate">
         <Text color="cyan" bold>
-          {(thread.title ?? thread.titleFallback ?? thread.id).slice(0, 60)}
+          {(thread.title ?? thread.titleFallback ?? thread.id).slice(0, Math.max(8, props.width - 4))}
         </Text>
-        <Text dimColor>
-          {" "}
-          {props.projectName} · {thread.providerId} · {thread.status}
-          {active ? " ●" : ""}
-        </Text>
+        {active ? <Text color="green"> ●</Text> : ""}
       </Text>
       <Box flexDirection="column" height={visibleCount} overflow="hidden">
         {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
@@ -160,9 +201,14 @@ export function ThreadPane(props: ThreadPaneProps) {
           </Text>
         ))}
       </Box>
+      {/* Context, not counters: where this thread runs and what it is doing.
+          Model and permission mode are deliberately absent — bb does not expose
+          them on the thread row, and a guessed value is worse than none. */}
       <Text dimColor wrap="truncate">
-        {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`} · history {props.timelineLength} · live{" "}
-        {props.conversationLive} · seq {props.cursorSeq}
+        {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`}
+        {contextRow(props).map((part) => ` · ${part}`)}
+        {props.thread.hasPendingInteraction ? " · " : ""}
+        {props.thread.hasPendingInteraction ? <Text color="yellow">needs you</Text> : ""}
       </Text>
       <Box
         flexDirection="column"

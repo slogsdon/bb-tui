@@ -37,6 +37,9 @@ export interface ThreadRow {
   archivedAt: string | null;
   updatedAt?: number;
   createdAt?: number;
+  environmentBranchName?: string | null;
+  environmentHostId?: string | null;
+  hasPendingInteraction?: boolean;
   [k: string]: unknown;
 }
 
@@ -166,6 +169,18 @@ export async function bbJson<T>(args: string[]): Promise<T> {
 
 export async function listProjects(): Promise<Project[]> {
   return bbJson<Project[]>(["project", "list"]);
+}
+
+export interface Machine {
+  id: string;
+  name: string;
+  status?: string;
+  [k: string]: unknown;
+}
+
+/** Execution machines, for turning a thread's environmentHostId into a name. */
+export async function listMachines(): Promise<Machine[]> {
+  return bbJson<Machine[]>(["machine", "list"]);
 }
 
 export interface SpawnResult {

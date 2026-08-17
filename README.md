@@ -9,13 +9,19 @@ A terminal UI around the bb ecosystem. **Phase 1 spike complete** — see
   (`getClientInfo` / `listThreads` / `getTimeline` / `eventsSince` with per-thread
   filter), CLI discovery (`bb tui info`), event buffer service (SQLite,
   realtime-driven), prefs (`bb plugin config bb-tui set hideReasoning|pollMs …`).
-- ✅ Client (Ink, Phase 2+): app-style split layout — left list (Needs
-  attention / Recent, content markers, colored status dots), right thread pane
-  (header, streaming transcript, bordered composer); adaptive 30% thread list
-  capped at 44 columns; single focused pane below 72 columns; contextual
-  shortcuts below pane borders; `tab` switches focus; word wrap; actions (`x`
+- ✅ Client (Ink, Phase 2+): app-style split layout — left list (threads grouped
+  under their project with fold markers and counts, content markers, colored
+  status dots), right thread pane (header, streaming transcript, bordered
+  composer); markdown rendering (headings, lists with hanging indents, fenced
+  code, quotes, tables, inline emphasis) tolerant of half-streamed text;
+  adaptive 30% thread list capped at 44 columns; single focused pane below 72
+  columns; contextual shortcuts below pane borders; `tab` switches focus;
+  `←/→` folds a project; `/` filters by thread or project title; right-aligned
+  branch/machine column (live activity while a thread runs); composer context
+  line (project · machine · branch · provider · turn elapsed); actions (`x`
   stop / `c` compact / `m` model); per-thread cursors; archived threads
   excluded; discovery cached; status refreshes event-gated.
+  Set `BB_TUI_DEBUG=1` to append buffer counters to the context line.
 - ⏭ Next: Phase 3 — terminals panes, queue UX, bundled single-file client.
 
 ## Pi provider note

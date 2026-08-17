@@ -32,6 +32,8 @@ export interface ThreadRow {
   visibility: "visible" | "hidden";
   pinnedAt: string | null;
   archivedAt: string | null;
+  updatedAt?: number;
+  createdAt?: number;
   [k: string]: unknown;
 }
 

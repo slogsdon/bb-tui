@@ -1,6 +1,9 @@
 import React, { type ReactNode } from "react";
 import { Box, Text } from "ink";
-import type { ThreadRow } from "./api.js";
+import type { Execution, ThreadRow } from "./api.js";
+import type { MdLine } from "./markdown.js";
+import type { ComposerLayout } from "./composer.js";
+import type { CatalogEntry } from "./commands.js";
 
 export type PaneFocus = "list" | "detail";
 
@@ -38,47 +41,92 @@ const STATUS_STYLE: Record<string, { glyph: string; color: string }> = {
   idle: { glyph: "○", color: "gray" },
 };
 
+/** One navigator row. Projects and their threads share a single index space so
+ * arrow keys move through the tree without special cases. */
+export type ListRow =
+  | { kind: "project"; projectId: string; name: string; count: number; collapsed: boolean }
+  | { kind: "thread"; thread: ThreadRow };
+
 export type ThreadListPaneProps = {
-  threads: ThreadRow[];
+  rows: ListRow[];
   selectedIndex: number;
   firstVisible: number;
   visibleCount: number;
   activityByThread: Map<string, string>;
+  hostNames: Map<string, string>;
   width: number;
   height: number;
 };
 
-/** Render the thread navigator without provider labels. */
+// A branch every thread shares distinguishes nothing; it just repeats down the
+// column and steals title width.
+const UNINFORMATIVE_BRANCHES = new Set(["main", "master", "trunk", "default"]);
+
+/** Stable per-thread metadata for the right-hand column: the branch it works on,
+ * or the machine it runs on when the branch says nothing. Generated worktree
+ * branches carry the thread id as a suffix — drop it, it is already the row.
+ * Returns "" whenever the value would be the same for every row, because a
+ * column of identical values is worse than no column. */
+export function threadMeta(thread: ThreadRow, hostNames: Map<string, string>): string {
+  const branch = (thread.environmentBranchName ?? "")
+    .replace(/-?thr_[a-z0-9]+$/i, "")
+    .replace(/^bb\//, "");
+  if (branch && !UNINFORMATIVE_BRANCHES.has(branch)) return branch;
+  // With a single machine enrolled, naming it tells you nothing either.
+  if (hostNames.size > 1) return hostNames.get(thread.environmentHostId ?? "") ?? "";
+  return "";
+}
+
+/** Render the thread navigator: threads grouped under their project, without
+ * provider labels. */
 export function ThreadListPane(props: ThreadListPaneProps) {
-  const visibleThreads = props.threads.slice(props.firstVisible, props.firstVisible + props.visibleCount);
+  const visibleRows = props.rows.slice(props.firstVisible, props.firstVisible + props.visibleCount);
+  const remaining = props.rows.length - (props.firstVisible + props.visibleCount);
 
   return (
     <Box flexDirection="column" width={props.width} height={props.height} borderStyle="round" overflow="hidden">
-      {props.threads.length === 0 && <Text dimColor>no threads</Text>}
-      {visibleThreads.map((thread, index) => {
+      {props.rows.length === 0 && <Text dimColor>no threads</Text>}
+      {visibleRows.map((row, index) => {
         const selected = props.firstVisible + index === props.selectedIndex;
+
+        if (row.kind === "project") {
+          return (
+            <Text key={`p:${row.projectId}`} color={selected ? "green" : undefined} wrap="truncate">
+              {selected ? "›" : " "}
+              {row.collapsed ? "▸" : "▾"} <Text bold>{row.name}</Text> <Text dimColor>{row.count}</Text>
+            </Text>
+          );
+        }
+
+        const thread = row.thread;
         const status = STATUS_STYLE[thread.status] ?? STATUS_STYLE.idle!;
-        const marker = props.activityByThread.get(thread.id);
-        const markerWidth = marker ? Math.min(14, Math.max(8, Math.floor(props.width * 0.25))) : 0;
-        const titleWidth = Math.max(8, props.width - 8 - markerWidth);
+        const running = thread.status === "active" || thread.status === "starting";
+        // A running thread's live activity is the useful thing to show; a settled
+        // one's is a stale fragment, so it yields to stable metadata you can
+        // actually scan by (which branch / which machine).
+        const meta = running ? props.activityByThread.get(thread.id) : threadMeta(thread, props.hostNames);
+        const metaWidth = meta ? Math.min(22, Math.max(8, Math.floor(props.width * 0.3))) : 0;
+        const titleWidth = Math.max(8, props.width - 8 - metaWidth);
         const title = (thread.title ?? thread.titleFallback ?? thread.id).slice(0, titleWidth);
+        const shown = meta ? meta.slice(0, metaWidth) : "";
+        // Flush the metadata right so the column reads as a column.
+        const gap = Math.max(1, titleWidth - title.length + (metaWidth - shown.length) + 1);
 
         return (
           <Text key={thread.id} color={selected ? "green" : undefined} wrap="truncate">
             {selected ? "› " : "  "}
             {thread.pinnedAt ? "◆" : " "}
             <Text color={status.color}>{status.glyph}</Text> {title}
-            {marker && (
+            {shown !== "" && (
               <Text dimColor>
-                {" "}⟶ {marker.slice(0, markerWidth)}
+                {" ".repeat(gap)}
+                {shown}
               </Text>
             )}
           </Text>
         );
       })}
-      {props.threads.length > props.visibleCount && (
-        <Text dimColor>… {props.threads.length - props.visibleCount} more</Text>
-      )}
+      {remaining > 0 && <Text dimColor>… {remaining} more</Text>}
     </Box>
   );
 }
@@ -86,58 +134,170 @@ export function ThreadListPane(props: ThreadListPaneProps) {
 export type ThreadPaneProps = {
   thread: ThreadRow;
   projectName: string;
-  timelineLength: number;
-  conversationLive: number;
-  detailLines: string[];
+  hostNames: Map<string, string>;
+  detailLines: MdLine[];
   scrollUp: number;
-  inputRows: string[];
+  composer: ComposerLayout;
+  /** Slash completion, when the token at the cursor matches something. */
+  menu?: { entries: CatalogEntry[]; selected: number };
   focus: PaneFocus;
-  cursorSeq: number;
+  /** Seconds the current turn has been running, when one is. */
+  elapsedSeconds: number | null;
+  /** Execution options for the next turn, once the timeline has reported them. */
+  execution?: Execution | null;
+  /** Set while the provider is in plan mode. */
+  planMode?: { prompt: string } | null;
+  /** Debug counters, shown only when BB_TUI_DEBUG is set. */
+  debug?: { timelineLength: number; conversationLive: number; cursorSeq: number };
   width: number;
   height: number;
 };
+
+/** The composer context line: project, machine, branch, model, permission mode,
+ * and what the thread is doing right now. Empty parts are dropped rather than
+ * shown blank. */
+export function contextRow(props: ThreadPaneProps): string[] {
+  const thread = props.thread;
+  const running = thread.status === "active" || thread.status === "starting";
+  const parts = [
+    props.projectName,
+    props.hostNames.get(thread.environmentHostId ?? "") ?? "",
+    thread.environmentBranchName ?? "",
+    // Permission mode precedes the model because the row truncates from the
+    // right: a bounded enum is useless half-rendered, while a model id stays
+    // recognizable. It is also the one fact here with safety consequences.
+    props.execution?.permissionMode ?? "",
+    // The model is the more specific fact and implies the provider, so it takes
+    // the slot rather than adding one. Provider stands in until it arrives.
+    props.execution?.model ?? thread.providerId,
+    running && props.elapsedSeconds !== null
+      ? `working ${props.elapsedSeconds}s · esc to interrupt`
+      : thread.status,
+  ];
+  if (props.debug) {
+    parts.push(
+      `history ${props.debug.timelineLength}`,
+      `live ${props.debug.conversationLive}`,
+      `seq ${props.debug.cursorSeq}`,
+    );
+  }
+  return parts.filter((p) => p !== "");
+}
+
+/** Rows the slash menu occupies, including its section headers. Capped so it
+ * can never crowd the transcript out entirely. */
+export const MENU_MAX_ENTRIES = 6;
+
+export function menuHeight(menu: ThreadPaneProps["menu"]): number {
+  if (!menu || menu.entries.length === 0) return 0;
+  const shown = Math.min(menu.entries.length, MENU_MAX_ENTRIES);
+  const sections = new Set(menu.entries.slice(0, shown).map((e) => e.kind)).size;
+  return shown + sections;
+}
+
+/** Slash completion, sectioned like the app: commands, then skills. */
+function SlashMenu(props: { menu: NonNullable<ThreadPaneProps["menu"]>; width: number }) {
+  const shown = props.menu.entries.slice(0, MENU_MAX_ENTRIES);
+  const nameWidth = Math.max(12, Math.floor(props.width * 0.4));
+  const descWidth = Math.max(0, props.width - nameWidth - 5);
+  let section: string | null = null;
+
+  return (
+    <Box flexDirection="column">
+      {shown.map((entry, index) => {
+        const header = entry.kind !== section ? (section = entry.kind) : null;
+        const selected = index === props.menu.selected;
+        return (
+          <Box flexDirection="column" key={`${entry.kind}:${entry.name}`}>
+            {header && <Text dimColor>{header === "command" ? "Commands" : "Skills"}</Text>}
+            <Text wrap="truncate" inverse={selected}>
+              {entry.kind === "command" ? " > " : " ~ "}
+              {entry.name.slice(0, nameWidth).padEnd(nameWidth)}
+              <Text dimColor={!selected}> {entry.description.slice(0, descWidth)}</Text>
+            </Text>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
+/** One composer row with the cursor drawn as an inverse cell. Terminals hide the
+ * real cursor in the alternate screen, so the block is the only position cue. */
+function CursorLine(props: { text: string; column: number; focused: boolean }) {
+  const before = props.text.slice(0, props.column);
+  const under = props.text.slice(props.column, props.column + 1) || " ";
+  const after = props.text.slice(props.column + 1);
+  if (!props.focused) return <Text>{props.text === "" ? " " : props.text}</Text>;
+  return (
+    <Text>
+      {before}
+      <Text inverse>{under}</Text>
+      {after}
+    </Text>
+  );
+}
 
 /** Render thread history and a fixed-height, visually distinct composer. */
 export function ThreadPane(props: ThreadPaneProps) {
   const thread = props.thread;
   const active = thread.status === "active" || thread.status === "starting";
-  const visibleCount = Math.max(3, props.height - 10);
+  // The pane has fixed geometry, so the menu takes its rows from the transcript
+  // rather than overlaying it.
+  const menuRows = menuHeight(props.menu);
+  const planRows = props.planMode ? 1 : 0;
+  const visibleCount = Math.max(3, props.height - 10 - menuRows - planRows);
   const scrollable = Math.max(0, props.detailLines.length - visibleCount);
   const clamped = Math.min(props.scrollUp, scrollable);
   const from = Math.max(0, props.detailLines.length - visibleCount - clamped);
   const visible = props.detailLines.slice(from, from + visibleCount);
-  const inputRows = props.inputRows.slice(-3);
+  const composer = props.composer;
+  const empty = composer.rows.length === 1 && composer.rows[0] === "";
 
   return (
     <Box flexDirection="column" width={props.width} height={props.height} borderStyle="round" overflow="hidden">
+      {/* Title only — the context line below the transcript carries the rest. */}
       <Text wrap="truncate">
         <Text color="cyan" bold>
-          {(thread.title ?? thread.titleFallback ?? thread.id).slice(0, 60)}
+          {(thread.title ?? thread.titleFallback ?? thread.id).slice(0, Math.max(8, props.width - 4))}
         </Text>
-        <Text dimColor>
-          {" "}
-          {props.projectName} · {thread.providerId} · {thread.status}
-          {active ? " ●" : ""}
-        </Text>
+        {active ? <Text color="green"> ●</Text> : ""}
       </Text>
       <Box flexDirection="column" height={visibleCount} overflow="hidden">
         {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
         {visible.map((line, index) => (
           <Text key={from + index} wrap="truncate">
-            {line.startsWith("U: ") ? (
-              <Text color="blue">{line}</Text>
-            ) : line.startsWith("A: ") ? (
-              <Text color="green">{line}</Text>
-            ) : (
-              <Text dimColor={line.startsWith("—") || line.startsWith("💭")}>{line}</Text>
-            )}
+            {/* A blank block separator still has to occupy a row. */}
+            {line.spans.length === 0
+              ? " "
+              : line.spans.map((span, spanIndex) => (
+                  <Text
+                    key={spanIndex}
+                    bold={span.bold}
+                    italic={span.italic}
+                    dimColor={span.dim}
+                    color={span.color}
+                  >
+                    {span.text}
+                  </Text>
+                ))}
           </Text>
         ))}
       </Box>
+      {/* Context, not counters: where this thread runs and what it is doing. */}
       <Text dimColor wrap="truncate">
-        {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`} · history {props.timelineLength} · live{" "}
-        {props.conversationLive} · seq {props.cursorSeq}
+        {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`}
+        {contextRow(props).map((part) => ` · ${part}`)}
+        {props.thread.hasPendingInteraction ? " · " : ""}
+        {props.thread.hasPendingInteraction ? <Text color="yellow">needs you</Text> : ""}
       </Text>
+      {props.planMode && (
+        <Text wrap="truncate">
+          <Text color="yellow">▍plan mode</Text>
+          <Text dimColor> · /cancel-plan to exit</Text>
+        </Text>
+      )}
+      {props.menu && menuRows > 0 && <SlashMenu menu={props.menu} width={props.width - 4} />}
       <Box
         flexDirection="column"
         height={6}
@@ -145,13 +305,23 @@ export function ThreadPane(props: ThreadPaneProps) {
         borderColor={props.focus === "detail" ? "cyan" : "gray"}
         paddingX={1}
       >
-        <Text color={props.focus === "detail" ? "cyan" : "gray"}>MESSAGE</Text>
-        {inputRows.length === 1 && inputRows[0] === "" ? (
-          <Text dimColor>Type a message…</Text>
+        <Text color={props.focus === "detail" ? "cyan" : "gray"}>
+          MESSAGE
+          {composer.scrolled ? <Text dimColor> ▲</Text> : ""}
+        </Text>
+        {empty ? (
+          <Text>
+            {props.focus === "detail" ? <Text inverse> </Text> : ""}
+            <Text dimColor>Type a message… (enter sends · shift-enter or ctrl-o for a new line)</Text>
+          </Text>
         ) : (
-          inputRows.map((line, index) => (
-            <Text key={index} color={active ? "green" : "white"} wrap="truncate">
-              {line === "" ? " " : line}
+          composer.rows.map((line, index) => (
+            <Text key={index} wrap="truncate">
+              {index === composer.cursorRow ? (
+                <CursorLine text={line} column={composer.cursorCol} focused={props.focus === "detail"} />
+              ) : (
+                <Text>{line === "" ? " " : line}</Text>
+              )}
             </Text>
           ))
         )}
@@ -213,13 +383,13 @@ export function WorkspaceLayout(props: WorkspaceLayoutProps) {
 export function ShortcutFooter(props: { compact: boolean; detailOpen: boolean; focus: PaneFocus }) {
   const shortcuts = props.compact
     ? props.detailOpen && props.focus === "detail"
-      ? "↑/↓ scroll · enter send · tab list · r/x/c/m · q quit"
-      : "↑/↓ select · enter open · n new · q quit"
+      ? "↑/↓ scroll · enter send · ^o newline · ^x stop · tab list"
+      : "↑/↓ select · ←/→ fold · / filter · enter open · n new · q quit"
     : !props.detailOpen
-      ? "↑/↓ select · enter open · n new · esc home · q quit"
+      ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · esc home · q quit"
       : props.focus === "list"
-        ? "↑/↓ select · enter open · n new · tab composer · esc home · q quit"
-        : "↑/↓ scroll · enter send · tab list · r/x/c/m actions · esc list · q quit";
+        ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · tab composer · esc home · q quit"
+        : "↑/↓ scroll · enter send · ⇧enter/^o newline · ^x stop · ^r ^t ^p · tab list · esc list";
   return (
     <Text dimColor wrap="truncate">
       {shortcuts}

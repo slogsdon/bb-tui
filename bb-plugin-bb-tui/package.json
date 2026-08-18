@@ -1,16 +1,29 @@
 {
   "name": "bb-plugin-bb-tui",
   "version": "0.1.0",
+  "description": "Server backend for bb-tui, a terminal UI for bb.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/slogsdon/bb-tui.git",
+    "directory": "bb-plugin-bb-tui"
+  },
+  "keywords": [
+    "bb",
+    "bb-plugin",
+    "tui",
+    "terminal"
+  ],
   "type": "module",
   "engines": {
     "bb": ">=0.38",
     "bbPluginSdk": ">=0.4.6"
   },
   "bb": {
-    "name": "Bb Tui",
-    "description": "A BB plugin.",
+    "name": "bb-tui",
+    "description": "Streams thread events to bb-tui, a terminal UI for bb, and tells the client where to find this server.",
     "branding": {
-      "icon": "Zap"
+      "icon": "Terminal"
     },
     "server": "./server.ts"
   },

@@ -3,15 +3,18 @@
 // composer). Tab switches focus between list and composer. Performance:
 // discovery is cached, status refreshes fire only on status-relevant events,
 // and timeline refreshes are throttled to the open thread.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
+  cancelPlan,
   compactThread,
   discover,
   eventActivityLabel,
   eventsSince,
   getTimeline,
+  listMachines,
   listProjects,
+  listSkills,
   listThreads,
   loadCursor,
   providerModels,
@@ -21,14 +24,25 @@ import {
   stopThread,
   tellThread,
   threadShow,
-  timelineLines,
+  timelineBlocks,
   type BufferedEvent,
   type ClientInfo,
   type EventsPage,
+  type Execution,
   type Project,
   type ThreadRow,
 } from "./api.js";
-import { calculatePaneLayout, WorkspaceLayout } from "./layout.js";
+import { calculatePaneLayout, WorkspaceLayout, type ListRow } from "./layout.js";
+import { renderBlocks, type TranscriptBlock } from "./markdown.js";
+import {
+  applyKey,
+  EMPTY,
+  layoutComposer,
+  replaceToken,
+  slashTokenAt,
+  type Composer,
+} from "./composer.js";
+import { buildCatalog, matchEntries, resolveSlash, type CatalogEntry } from "./commands.js";
 import { enterAlternateScreen } from "./terminal.js";
 
 type View =
@@ -38,10 +52,17 @@ type View =
   | { kind: "model"; thread: ThreadRow };
 
 const MAX_TAIL = 600;
-const MAX_TRANSCRIPT_CHARS = 600;
+// Per-item cap on assembled streaming text. Generous because the pane already
+// windows what it draws — this exists to bound memory, not to shorten messages.
+const MAX_TRANSCRIPT_CHARS = 20_000;
 const MAX_INPUT_ROWS = 3;
+const MAX_TRANSCRIPT_BLOCKS = 200;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
+
+// Erase screen + scrollback, cursor home. Written as escapes rather than literal
+// control bytes so the source stays plain ASCII.
+const CLEAR_SCREEN = "\u001B[2J\u001B[3J\u001B[H";
 
 /** Apply an input chunk: erase bytes pop, printable chars append, control
  * dropped. Handles batched keystrokes and Ink's inconsistent backspace/delete
@@ -55,7 +76,8 @@ function transformInput(prev: string, data: string): string {
   return s;
 }
 
-/** Word-wrap a line to width (continuation lines indented two spaces). */
+/** Word-wrap the composer input to width. Transcript text goes through
+ * renderBlocks instead — it needs styling and hanging indents this cannot do. */
 function wrapToWidth(text: string, width: number): string[] {
   const w = Math.max(8, width);
   const words = text.split(/\s+/).filter(Boolean);
@@ -101,13 +123,25 @@ export default function App() {
   const [view, setView] = useState<View>({ kind: "home" });
   const [focus, setFocus] = useState<"list" | "detail">("list");
   const [tail, setTail] = useState<BufferedEvent[]>([]);
-  const [timeline, setTimeline] = useState<string[]>([]);
-  const [input, setInput] = useState("");
+  const [timeline, setTimeline] = useState<TranscriptBlock[]>([]);
+  const [execution, setExecution] = useState<Execution | null>(null);
+  const [planMode, setPlanMode] = useState<{ prompt: string } | null>(null);
+  const [composer, setComposer] = useState<Composer>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting…");
   const [hideReasoning, setHideReasoning] = useState(true);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [hostNames, setHostNames] = useState<Map<string, string>>(new Map());
+  const [filter, setFilter] = useState("");
+  const [filtering, setFiltering] = useState(false);
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  const [clockTick, setClockTick] = useState(0);
+  const [repainting, setRepainting] = useState(false);
   const [scrollUp, setScrollUp] = useState(0);
   const [modelHints, setModelHints] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
+  const [menuSel, setMenuSel] = useState(0);
+  const [menuDismissed, setMenuDismissed] = useState(false);
 
   const cursorRef = useRef(0);
   const threadCursorRef = useRef(new Map<string, number>());
@@ -124,6 +158,43 @@ export default function App() {
   const focusRef = useRef<"list" | "detail">("list");
   useEffect(() => void (viewRef.current = view), [view]);
   useEffect(() => void (focusRef.current = focus), [focus]);
+
+  // Force a complete rewrite of every cell. Recovery, not prevention: the
+  // corruption happens in the client (Termius on iOS garbles the bottom border),
+  // and Ink's incremental redraw leaves the damage there indefinitely.
+  //
+  // Ink's own clear() is not enough — it erases the screen but leaves lastOutput
+  // set, and render() skips writing when the new output matches it, so the
+  // screen stays blank until something genuinely changes. Render one throwaway
+  // frame instead: it differs from the frame before it and from the frame after,
+  // so Ink writes both, and the second write repaints everything.
+  const repaint = useCallback(() => {
+    stdout.write(CLEAR_SCREEN);
+    setRepainting(true);
+  }, [stdout]);
+
+  useEffect(() => {
+    if (!repainting) return;
+    const t = setTimeout(() => setRepainting(false), 16);
+    return () => clearTimeout(t);
+  }, [repainting]);
+
+  // A resize is the likeliest moment to inherit a garbled frame — the iOS
+  // keyboard opening or closing fires several in a burst — so repaint instead
+  // of letting Ink diff against a frame the client may have mangled. Debounced
+  // so a burst costs one redraw, not one per event.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onResize = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(repaint, 100);
+    };
+    stdout.on("resize", onResize);
+    return () => {
+      if (timer) clearTimeout(timer);
+      stdout.off("resize", onResize);
+    };
+  }, [stdout, repaint]);
 
   // Bootstrap.
   useEffect(() => {
@@ -143,6 +214,13 @@ export default function App() {
         setSpawnProject(personal?.id ?? order[0]);
         const { threads } = await listThreads(info, undefined, 200);
         setThreads(sortThreads(threads.filter((t) => !t.archivedAt)));
+        // Thread rows carry a host id, not a host name; resolve once.
+        try {
+          const machines = await listMachines();
+          setHostNames(new Map(machines.map((m) => [m.id, m.name])));
+        } catch {
+          // non-fatal: rows fall back to showing no machine
+        }
       } catch (err) {
         setError(String(err));
         setStatus("failed");
@@ -190,6 +268,12 @@ export default function App() {
           tailRef.current = next;
           setTail(next);
           assembleTranscripts(fresh);
+          // Turn clock for the open thread: how long has it been working.
+          for (const e of fresh) {
+            if (focusId && e.threadId !== focusId) continue;
+            if (e.type === "turn/started") setTurnStartedAt(e.ts || Date.now());
+            else if (e.type === "turn/completed") setTurnStartedAt(null);
+          }
           // Status row refreshes only on status-relevant events, throttled.
           const hasStatus = fresh.some((e) => STATUS_EVENTS.has(e.type));
           if (hasStatus && Date.now() - lastStatusRefreshRef.current > 2000) {
@@ -203,8 +287,10 @@ export default function App() {
         if (focusId && now - lastTimelineRefreshRef.current > 4000) {
           lastTimelineRefreshRef.current = now;
           try {
-            const { items } = await getTimeline(info, focusId);
-            setTimeline(items.flatMap((i) => timelineLines(i)).slice(-120));
+            const tl = await getTimeline(info, focusId);
+            setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+            setExecution(tl.execution ?? null);
+            setPlanMode(tl.planMode ?? null);
           } catch {
             // non-fatal; next cycle retries
           }
@@ -215,6 +301,19 @@ export default function App() {
     }, pollMsRef.current);
     return () => clearInterval(t);
   }, [info]);
+
+  // A running turn needs a second hand, and nothing else re-renders between
+  // events. Only ticks while a turn is actually open.
+  useEffect(() => {
+    if (turnStartedAt === null) return;
+    const t = setInterval(() => setClockTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [turnStartedAt]);
+
+  const elapsedSeconds = useMemo(
+    () => (turnStartedAt === null ? null : Math.max(0, Math.round((Date.now() - turnStartedAt) / 1000))),
+    [turnStartedAt, clockTick],
+  );
 
   function assembleTranscripts(events: BufferedEvent[]) {
     for (const e of events) {
@@ -281,12 +380,20 @@ export default function App() {
     setView({ kind: "detail", thread: snapshot });
     setFocus("detail");
     setTimeline([]);
-    setInput("");
+    setExecution(null);
+    setPlanMode(null);
+    setComposer(EMPTY);
     setScrollUp(0);
     setStatus(`opening ${t.id}`);
+    // Project-scoped, since project skills override user and builtin ones.
+    void listSkills(t.projectId)
+      .then((skills) => setCatalog(buildCatalog(skills)))
+      .catch(() => setCatalog(buildCatalog([])));
     try {
-      const { items } = await getTimeline(info!, t.id);
-      setTimeline(items.flatMap((i) => timelineLines(i)).slice(-120));
+      const tl = await getTimeline(info!, t.id);
+      setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+      setExecution(tl.execution ?? null);
+      setPlanMode(tl.planMode ?? null);
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
       assembleTranscripts(evs);
       setStatus(`${t.providerId} · ${t.status}`);
@@ -295,31 +402,53 @@ export default function App() {
     }
   }
 
+  /** The bb-side implementation of a slash command. Kept next to the table it
+   * serves rather than inside it, so the table stays data. */
+  function runBbCommand(name: string, threadId: string): Promise<unknown> {
+    if (name === "compact") return compactThread(threadId);
+    if (name === "cancel-plan") return cancelPlan(threadId);
+    return Promise.reject(new Error(`no bb implementation for /${name}`));
+  }
+
   function backToHome() {
     setView({ kind: "home" });
     setFocus("list");
-    setInput("");
+    setComposer(EMPTY);
     refreshThreadStatuses();
   }
 
   function appendUserMsg(threadId: string, text: string) {
     const list = userMsgsRef.current.get(threadId) ?? [];
-    const line = `U: ${text}`;
-    if (list[list.length - 1] !== line) {
-      userMsgsRef.current.set(threadId, [...list.slice(-60), line]);
+    if (list[list.length - 1] !== text) {
+      userMsgsRef.current.set(threadId, [...list.slice(-60), text]);
     }
   }
 
   async function send() {
-    if (view.kind !== "detail" || !input.trim()) return;
+    if (view.kind !== "detail" || !composer.text.trim()) return;
     const tid = view.thread.id;
-    const text = input.trim();
-    setInput("");
+    const resolved = resolveSlash(composer.text);
+    setComposer(EMPTY);
     setScrollUp(0);
-    appendUserMsg(tid, text);
+
+    // A message that *is* a bb command runs the same operation the app composer
+    // does; `bb thread tell` is raw and would send the literal string instead.
+    if (resolved.kind === "command") {
+      setStatus(`running /${resolved.name}…`);
+      try {
+        await runBbCommand(resolved.name, tid);
+        setStatus(`/${resolved.name} done`);
+        refreshThreadStatuses();
+      } catch (err) {
+        setStatus(`/${resolved.name} error: ${String(err)}`);
+      }
+      return;
+    }
+
+    appendUserMsg(tid, resolved.text);
     setStatus("sending…");
     try {
-      await tellThread(tid, text);
+      await tellThread(tid, resolved.text);
       setStatus(`sent → ${view.thread.providerId}`);
       refreshThreadStatuses();
     } catch (err) {
@@ -327,23 +456,28 @@ export default function App() {
     }
   }
 
-  async function doSpawn(promptText: string, useGo: boolean) {
+  /** `configured` picks the alternate spawn target from plugin settings, when
+   * one is set; otherwise both paths fall through to the project's defaults. */
+  async function doSpawn(promptText: string, configured: boolean) {
     if (!promptText.trim() || !info) return;
     const projectId = spawnProject ?? projectOrder[0];
     if (!projectId) {
       setStatus("no project available");
       return;
     }
-    const target = useGo ? "pi · opencode-go" : "project defaults";
+    const spawn = configured ? (info.spawn ?? null) : null;
+    const target = spawn
+      ? [spawn.provider, spawn.model].filter(Boolean).join(" · ")
+      : "project defaults";
     const text = promptText.trim();
-    setInput("");
+    setComposer(EMPTY);
     setStatus(`spawning thread (${projects.get(projectId) ?? projectId}, ${target})…`);
     try {
       const result = await spawnThread(
         projectId,
         text,
-        useGo ? "pi" : undefined,
-        useGo ? "opencode-go/deepseek-v4-flash" : undefined,
+        spawn?.provider ?? undefined,
+        spawn?.model ?? undefined,
       );
       const t = await threadShow(result.id);
       localGraceRef.current.set(t.id, Date.now());
@@ -360,7 +494,7 @@ export default function App() {
   async function doModel(model: string) {
     if (view.kind !== "model" || !model.trim()) return;
     const t = view.thread;
-    setInput("");
+    setComposer(EMPTY);
     try {
       await setThreadModel(t.id, model.trim());
       setStatus(`model → ${model.trim()}`);
@@ -373,7 +507,7 @@ export default function App() {
 
   async function pickModel(t: ThreadRow) {
     setView({ kind: "model", thread: t });
-    setInput("");
+    setComposer(EMPTY);
     setStatus("loading models…");
     try {
       const ms = await providerModels(t.providerId);
@@ -388,71 +522,107 @@ export default function App() {
   // ---- keyboard ----
   useInput((data, key) => {
     if (key.ctrl && data === "c") return exit();
+    // Checked before every mode so it works from the composer and filter too.
+    if (key.ctrl && data === "l") return repaint();
+
+    // Filter mode owns every keystroke until it is dismissed, otherwise typing
+    // a title would trigger the single-key actions underneath it.
+    if (filtering) {
+      if (key.escape) {
+        setFiltering(false);
+        setFilter("");
+      } else if (key.return) {
+        setFiltering(false);
+      } else if (key.upArrow) setSel((s) => Math.max(0, s - 1));
+      else if (key.downArrow) setSel((s) => Math.min(listRows.length - 1, s + 1));
+      else if (isEraseKey(key) || data) {
+        setFilter((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
+        setSel(0);
+      }
+      return;
+    }
 
     if (view.kind === "spawn") {
-      if (key.return) void doSpawn(input, true);
+      if (key.return) void doSpawn(composer.text, true);
       else if (key.escape || data === "q") setView({ kind: "home" });
-      else if (input === "" && data === "t") {
+      else if (key.ctrl && data === "t") {
         const order = projectOrder;
         if (order.length > 0) {
           const i = order.indexOf(spawnProject ?? "");
           setSpawnProject(order[(i + 1) % order.length]);
         }
-      } else if (input === "" && data === "d") void doSpawn(input, false);
-      else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
+      } else if (key.ctrl && data === "d") void doSpawn(composer.text, false);
+      else setComposer((c) => applyKey(c, data, key));
       return;
     }
     if (view.kind === "model") {
-      if (key.return) void doModel(input);
+      if (key.return) void doModel(composer.text);
       else if (key.escape || data === "q") {
         const t = view.thread;
         setView({ kind: "detail", thread: t });
         setFocus("detail");
-      } else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
+      } else setComposer((c) => applyKey(c, data, key));
       return;
     }
     if (view.kind === "detail") {
       if (focus === "list") {
         if (key.upArrow) setSel((s) => Math.max(0, s - 1));
-        else if (key.downArrow) setSel((s) => Math.min(threads.length - 1, s + 1));
-        else if (key.return && threads[sel]) void openThread(threads[sel]!);
+        else if (key.downArrow) setSel((s) => Math.min(listRows.length - 1, s + 1));
+        else if (key.return) activateRow();
+        else if (key.leftArrow || key.rightArrow) collapseKey(key.rightArrow === true);
+        else if (data === "/") startFilter();
         else if (data === "n") {
           setView({ kind: "spawn" });
-          setInput("");
+          setComposer(EMPTY);
         } else if (key.tab) setFocus("detail");
         else if (key.escape || data === "q") backToHome();
         return;
       }
-      // composer focus
-      if (key.return) void send();
-      else if (key.escape || data === "q") setFocus("list");
+      // Composer focus. Every printable key belongs to the message — the
+      // actions live on ctrl chords, because gating them on an empty composer
+      // meant a message could not begin with those letters.
+      // With the menu open it owns enter, tab, the arrows and escape. Escape
+      // only dismisses it — a second escape leaves the composer.
+      if (menuOpen && !key.shift && (key.return || key.tab)) return acceptMenuEntry();
+      if (menuOpen && key.upArrow) return setMenuSel((s) => Math.max(0, s - 1));
+      if (menuOpen && key.downArrow) return setMenuSel((s) => Math.min(menuMatches.length - 1, s + 1));
+      if (menuOpen && key.escape) return setMenuDismissed(true);
+
+      if (key.return && key.shift) setComposer((c) => applyKey(c, "\n", {}));
+      else if (key.return) void send();
+      else if (key.ctrl && data === "o") setComposer((c) => applyKey(c, "\n", {}));
+      else if (key.escape) setFocus("list");
       else if (key.tab) setFocus("list");
-      else if (key.upArrow) setScrollUp((s) => s + 1);
-      else if (key.downArrow) setScrollUp((s) => Math.max(0, s - 1));
-      else if (input === "" && data === "r") {
-        setHideReasoning((v) => !v);
-        setStatus(`reasoning deltas ${hideReasoning ? "shown" : "hidden"}`);
-      } else if (input === "" && data === "x") {
+      // Arrows keep scrolling the transcript, as before; left/right reach the
+      // composer so the cursor can still move.
+      else if (key.upArrow || key.pageUp) setScrollUp((s) => s + 1);
+      else if (key.downArrow || key.pageDown) setScrollUp((s) => Math.max(0, s - 1));
+      else if (key.ctrl && data === "x") {
         setStatus("stopping…");
         void stopThread(view.thread.id).then(() => {
           setStatus("stopped");
           refreshThreadStatuses();
         });
-      } else if (input === "" && data === "c") {
+      } else if (key.ctrl && data === "r") {
+        setHideReasoning((v) => !v);
+        setStatus(`reasoning deltas ${hideReasoning ? "shown" : "hidden"}`);
+      } else if (key.ctrl && data === "t") {
         setStatus("compacting…");
         void compactThread(view.thread.id).then(() => setStatus("compaction requested"));
-      } else if (input === "" && data === "m") {
+      } else if (key.ctrl && data === "p") {
         void pickModel(view.thread);
-      } else if (isEraseKey(key) || data) setInput((s) => transformInput(s, isEraseKey(key) ? "\x7f" : data));
+      } else setComposer((c) => applyKey(c, data, key));
       return;
     }
     // home view (no detail open)
     if (key.upArrow) setSel((s) => Math.max(0, s - 1));
-    else if (key.downArrow) setSel((s) => Math.min(threads.length - 1, s + 1));
-    else if (key.return && threads[sel]) void openThread(threads[sel]!);
+    else if (key.downArrow) setSel((s) => Math.min(listRows.length - 1, s + 1));
+    else if (key.return) activateRow();
+    else if (key.leftArrow || key.rightArrow) collapseKey(key.rightArrow === true);
+    else if (data === "/") startFilter();
     else if (data === "n") {
       setView({ kind: "spawn" });
-      setInput("");
+      setComposer(EMPTY);
     }
   });
 
@@ -463,19 +633,139 @@ export default function App() {
   );
 
   const conversation = useMemo(() => {
-    if (view.kind !== "detail") return { lines: [] as string[], live: 0 };
+    if (view.kind !== "detail") return { blocks: [] as TranscriptBlock[], live: 0 };
     const prefix = `${view.thread.id}::`;
-    const agent = [...transcriptsRef.current.entries()]
-      .filter(([k, text]) => k.startsWith(prefix) && text.length > 0)
-      .map(([, text]) => `A: ${text.replace(/\n/g, " ").trim()}`);
+    // Newlines are load-bearing: they carry the markdown block structure the
+    // renderer needs. Only trim the edges.
+    // The server timeline is authoritative. Once a streamed message lands there,
+    // the locally assembled copy is a stale duplicate of the same text (and a
+    // truncated one while the turn is still arriving), so drop it.
+    const settled = timeline.filter((b) => b.role === "agent").map((b) => b.text);
+    const agent: TranscriptBlock[] = [...transcriptsRef.current.entries()]
+      .filter(([k, text]) => k.startsWith(prefix) && text.trim().length > 0)
+      .map(([, text]) => text.trim())
+      .filter((text) => !settled.some((s) => s.includes(text)))
+      .map((text) => ({ role: "agent" as const, text }));
     if (!hideReasoning) {
       for (const [k, text] of reasoningRef.current.entries()) {
-        if (k.startsWith(prefix) && text.length > 0) agent.push(`💭 ${text.replace(/\n/g, " ").trim()}`);
+        if (k.startsWith(prefix) && text.trim().length > 0) {
+          agent.push({ role: "reasoning", text: text.trim() });
+        }
       }
     }
-    const users = (userMsgsRef.current.get(view.thread.id) ?? []).filter((l) => !timeline.includes(l));
-    return { lines: [...timeline, ...users, ...agent], live: focusedEvents.length };
+    const sent = new Set(timeline.filter((b) => b.role === "user").map((b) => b.text));
+    const users: TranscriptBlock[] = (userMsgsRef.current.get(view.thread.id) ?? [])
+      .filter((text) => !sent.has(text))
+      .map((text) => ({ role: "user" as const, text }));
+    return { blocks: [...timeline, ...users, ...agent], live: focusedEvents.length };
   }, [timeline, focusedEvents, hideReasoning, view]);
+
+  // Navigator rows: threads grouped under their project. A flat list of every
+  // thread on the host is unnavigable past ~20 rows; the project is the unit
+  // people actually search by. Projects sort by their most recent thread, so
+  // whatever just moved floats up.
+  const listRows = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    const matches = (t: ThreadRow) =>
+      needle === "" ||
+      (t.title ?? t.titleFallback ?? t.id).toLowerCase().includes(needle) ||
+      (projects.get(t.projectId) ?? "").toLowerCase().includes(needle);
+    const groups = new Map<string, ThreadRow[]>();
+    for (const t of threads) {
+      if (!matches(t)) continue;
+      const list = groups.get(t.projectId);
+      if (list) list.push(t);
+      else groups.set(t.projectId, [t]);
+    }
+    const recency = (list: ThreadRow[]) => Math.max(...list.map((t) => t.updatedAt ?? 0));
+    const ordered = [...groups.entries()].sort((a, b) => recency(b[1]) - recency(a[1]));
+    const rows: ListRow[] = [];
+    for (const [projectId, list] of ordered) {
+      // A filter that hides its own matches is useless — searching overrides fold state.
+      const isCollapsed = needle === "" && collapsed.has(projectId);
+      rows.push({
+        kind: "project",
+        projectId,
+        name: projects.get(projectId) ?? projectId,
+        count: list.length,
+        collapsed: isCollapsed,
+      });
+      if (!isCollapsed) for (const thread of list) rows.push({ kind: "thread", thread });
+    }
+    return rows;
+  }, [threads, projects, collapsed, filter]);
+
+  const selectedRow = listRows[sel];
+
+  function toggleProject(projectId: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  }
+
+  /** Enter: open a thread, or fold the project it lands on. */
+  function activateRow() {
+    if (!selectedRow) return;
+    if (selectedRow.kind === "project") toggleProject(selectedRow.projectId);
+    else void openThread(selectedRow.thread);
+  }
+
+  function startFilter() {
+    setFiltering(true);
+    setFilter("");
+    setSel(0);
+  }
+
+  /** ←/→ fold and unfold. On a thread row, ← jumps to its project header so a
+   * whole group can be closed without hunting for the header first. */
+  function collapseKey(expand: boolean) {
+    if (!selectedRow) return;
+    if (selectedRow.kind === "project") {
+      if (expand === collapsed.has(selectedRow.projectId)) toggleProject(selectedRow.projectId);
+      return;
+    }
+    if (expand) return;
+    const header = listRows.findIndex(
+      (r) => r.kind === "project" && r.projectId === selectedRow.thread.projectId,
+    );
+    if (header >= 0) {
+      setSel(header);
+      toggleProject(selectedRow.thread.projectId);
+    }
+  }
+
+  // Slash menu. The token rule is bb.app's: a slash at index 0 or after a
+  // space. Zero matches hides the menu, which is what keeps an absolute path
+  // from getting in the way.
+  const slashToken = useMemo(
+    () => (focus === "detail" && view.kind === "detail" ? slashTokenAt(composer) : null),
+    [composer, focus, view],
+  );
+  const menuMatches = useMemo(
+    () => (slashToken ? matchEntries(catalog, slashToken.text) : []),
+    [catalog, slashToken],
+  );
+  const menuOpen = menuMatches.length > 0 && !menuDismissed;
+
+  // Re-arm the menu whenever the token itself changes, so dismissing applies to
+  // the token you dismissed and not to the rest of the message.
+  const tokenText = slashToken?.text ?? null;
+  useEffect(() => {
+    setMenuDismissed(false);
+    setMenuSel(0);
+  }, [tokenText]);
+
+  function acceptMenuEntry() {
+    const entry = menuMatches[menuSel];
+    if (!slashToken || !entry) return;
+    setComposer((c) => {
+      const token = slashTokenAt(c);
+      return token ? replaceToken(c, token, entry.name) : c;
+    });
+  }
 
   // Latest meaningful activity per thread (content, not raw event names).
   const byThread = useMemo(() => {
@@ -490,13 +780,13 @@ export default function App() {
 
   const paneLayout = calculatePaneLayout(cols, focus);
   const detailInnerW = Math.max(8, (paneLayout.detailWidth || cols - 1) - 4);
-  const inputRows = useMemo(() => {
-    if (!input) return [""];
-    return wrapToWidth(input, detailInnerW).slice(-MAX_INPUT_ROWS);
-  }, [input, detailInnerW]);
+  const composerLayout = useMemo(
+    () => layoutComposer(composer, detailInnerW, MAX_INPUT_ROWS),
+    [composer, detailInnerW],
+  );
 
   const detailLines = useMemo(
-    () => (view.kind === "detail" ? conversation.lines.flatMap((l) => wrapToWidth(l, detailInnerW)) : []),
+    () => (view.kind === "detail" ? renderBlocks(conversation.blocks, detailInnerW) : []),
     [conversation, detailInnerW, view],
   );
 
@@ -510,16 +800,31 @@ export default function App() {
     );
   }
 
+  // One frame of nothing, so the frame after it is written in full. See repaint().
+  if (repainting) {
+    return <Text> </Text>;
+  }
+
   if (view.kind === "spawn") {
+    // Names the configured spawn target so the two shortcuts are legible; with
+    // nothing configured both spawn the same way and the label says so.
+    const configured = info?.spawn ?? null;
+    // With no spawn target configured the two keys do the same thing, so say so
+    // once rather than printing "spawn defaults · d=defaults".
+    const spawnHint = configured
+      ? `enter=spawn ${[configured.provider, configured.model].filter(Boolean).join("/")} · d=defaults`
+      : "enter/d=spawn defaults";
     return (
       <Box flexDirection="column">
-        <Text color="cyan">New thread — prompt (enter=spawn pi/opencode-go · d=defaults · t=project)</Text>
+        <Text color="cyan">
+          New thread — prompt ({spawnHint} · t=project)
+        </Text>
         <Text dimColor>
           project: {spawnProject ? `${projects.get(spawnProject) ?? spawnProject} (${spawnProject})` : "—"}
         </Text>
-        {inputRows.map((l, i) => (
+        {composerLayout.rows.map((l, i) => (
           <Text key={i} wrap="truncate">
-            {i === inputRows.length - 1 ? `> ${l}` : `  ${l}`}
+            {i === composerLayout.rows.length - 1 ? `> ${l}` : `  ${l}`}
           </Text>
         ))}
         <Text dimColor>enter=spawn d=defaults t=cycle project esc/q=cancel</Text>
@@ -531,9 +836,9 @@ export default function App() {
     return (
       <Box flexDirection="column">
         <Text color="cyan">Model for {view.thread.id} (provider {view.thread.providerId}):</Text>
-        {inputRows.map((l, i) => (
+        {composerLayout.rows.map((l, i) => (
           <Text key={i} wrap="truncate">
-            {i === inputRows.length - 1 ? `> ${l}` : `  ${l}`}
+            {i === composerLayout.rows.length - 1 ? `> ${l}` : `  ${l}`}
           </Text>
         ))}
         {modelHints.map((id) => (
@@ -546,8 +851,10 @@ export default function App() {
     );
   }
 
-  const firstVisible = Math.max(0, sel - 4);
   const visibleCount = Math.max(4, rows - 6);
+  // Keep the selection four rows down the pane, but stop scrolling once the end
+  // of the list is on screen.
+  const firstVisible = Math.max(0, Math.min(sel - 4, listRows.length - visibleCount));
 
   return (
     <WorkspaceLayout
@@ -559,30 +866,48 @@ export default function App() {
           <Text color="cyan" bold>
             bb-tui
           </Text>
-          <Text dimColor>
-            {" "}· {status} · {projects.size} projects · {threads.length} threads · tab=focus
-          </Text>
+          {filtering || filter !== "" ? (
+            <Text color="yellow">
+              {" "}
+              /{filter}
+              {filtering ? "_" : ""} · {listRows.length} rows
+            </Text>
+          ) : (
+            <Text dimColor>
+              {" "}· {status} · {projects.size} projects · {threads.length} threads · tab=focus
+            </Text>
+          )}
         </>
       }
       list={{
-        threads,
+        rows: listRows,
         selectedIndex: sel,
         firstVisible,
         visibleCount,
         activityByThread: byThread,
+        hostNames,
       }}
       detail={
         view.kind === "detail"
           ? {
               thread: view.thread,
               projectName: projects.get(view.thread.projectId) ?? view.thread.projectId,
-              timelineLength: timeline.length,
-              conversationLive: conversation.live,
+              hostNames,
               detailLines,
               scrollUp,
-              inputRows,
+              composer: composerLayout,
+              menu: menuOpen ? { entries: menuMatches, selected: menuSel } : undefined,
               focus,
-              cursorSeq: cursorRef.current,
+              elapsedSeconds,
+              execution,
+              planMode,
+              debug: process.env.BB_TUI_DEBUG
+                ? {
+                    timelineLength: timeline.length,
+                    conversationLive: conversation.live,
+                    cursorSeq: cursorRef.current,
+                  }
+                : undefined,
             }
           : undefined
       }

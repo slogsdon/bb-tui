@@ -10,8 +10,8 @@
 
 ## Global Constraints
 
-- Document only the current source-based development path; no bundled `bb-tui` binary exists yet.
-- Require Node.js 20+, npm, and a same-host bb server version 0.38 or newer.
+- Document the checkout and Git release paths for the plugin; the client still has no bundled `bb-tui` binary.
+- Require Node.js 20+, npm, and a bb server version 0.38 or newer; document `serverUrl` for non-loopback clients.
 - Use `npm ci` because both packages have committed `package-lock.json` files.
 - Do not add dependencies or change application behavior.
 - Preserve the explicit statement that Termius has not been device-verified.
@@ -47,7 +47,7 @@ Use this section order and content contract:
 
 Source-stage terminal UI for bb, composed of a server-side bb plugin and a local Ink client.
 
-> Development status: run from source. A packaged `bb-tui` binary, Git/npm install path, and marketplace release are not available yet.
+> Development status: install the plugin from a checkout or Git release; run the client from source because no bundled `bb-tui` binary exists.
 
 ## Prerequisites
 
@@ -60,7 +60,7 @@ Source-stage terminal UI for bb, composed of a server-side bb plugin and a local
 From the repository root:
 
 1. Install locked dependencies in both packages.
-2. Install the plugin from `./bb-plugin-bb-tui` with `bb plugin install ... --yes`.
+2. Install the checkout collection with `bb plugin install path:. --plugin bb-tui --yes`.
 3. Verify discovery with `bb tui info`.
 4. Start the interactive client from `client` with `npm run dev`.
 
@@ -72,8 +72,10 @@ From the repository root:
 
 ## Headless client commands
 
-Document `npm run cli -- info`, `npm run cli -- list`, and
-`npm run cli -- watch --thread <thread-id>` from `client`.
+Document `npm --prefix client run cli -- info`,
+`npm --prefix client run cli -- list`, and
+`npm --prefix client run cli -- watch --thread <thread-id>` from the repository
+root.
 
 ## Configuration
 
@@ -145,7 +147,7 @@ Link to `../README.md` for complete contributor setup.
 Document only:
 - `npm ci`
 - `bb plugin install . --yes`
-- `bb plugin reload bb-tui`
+- `bb plugin dev` for the edit/reload loop
 - `bb tui info`
 - `bb plugin config bb-tui`
 - settings: `hideReasoning`, `pollMs`, `retentionDays`
@@ -161,7 +163,7 @@ Retain the engine floors (`bb >=0.38`, plugin SDK `>=0.4.6`) and remove generic 
 Run:
 
 ```bash
-rg -n "greeting|bb plugin new|packaged.*binary|marketplace.*available" bb-plugin-bb-tui/README.md
+rg -n "greeting|bb plugin new|bundled.*client.*available|marketplace.*available" bb-plugin-bb-tui/README.md
 ```
 
 Expected: no output.
@@ -197,7 +199,7 @@ npm --prefix client run typecheck
 ./bb-plugin-bb-tui/node_modules/.bin/tsc --noEmit -p bb-plugin-bb-tui/tsconfig.json
 ```
 
-Expected: 11 client tests pass and both TypeScript checks exit 0.
+Expected: all client tests pass and both TypeScript checks exit 0.
 
 - [x] **Step 3: Verify the live plugin interface**
 

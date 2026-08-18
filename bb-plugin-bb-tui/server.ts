@@ -19,6 +19,10 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
+/** Kept in step with package.json `version` by hand; the manifest is the
+ * source of truth for installs, this is only what the client displays. */
+const PLUGIN_VERSION = "0.1.0";
+
 const rpcContract = defineRpcContract({
   getClientInfo: {
     input: z.null(),
@@ -32,6 +36,11 @@ const rpcContract = defineRpcContract({
         hideReasoning: z.boolean(),
         pollMs: z.number(),
       }),
+      // Optional spawn target for the client's alternate new-thread shortcut.
+      // Null means "use the project's own defaults".
+      spawn: z
+        .object({ provider: z.string().nullable(), model: z.string().nullable() })
+        .nullable(),
     }),
   },
   listThreads: {
@@ -45,7 +54,19 @@ const rpcContract = defineRpcContract({
   },
   getTimeline: {
     input: z.object({ threadId: z.string() }).strict(),
-    output: z.object({ items: z.array(z.unknown()), nextTs: z.number().optional() }),
+    output: z.object({
+      items: z.array(z.unknown()),
+      nextTs: z.number().optional(),
+      // Plan mode is the provider's state, not a bb setting: bb reports it and
+      // can cancel it, but nothing client-side can enter it.
+      planMode: z.object({ prompt: z.string() }).nullable().optional(),
+      // Execution options the thread's next turn will use. Absent from the
+      // thread row; this resolver is the only place they exist.
+      execution: z
+        .object({ model: z.string(), permissionMode: z.string(), reasoningLevel: z.string() })
+        .nullable()
+        .optional(),
+    }),
   },
   eventsSince: {
     input: z
@@ -77,6 +98,18 @@ export default async function plugin(bb: BbPluginApi) {
     retentionDays: { type: "string", label: "Event buffer retention (days)", default: "7" },
     hideReasoning: { type: "boolean", label: "Suppress reasoning deltas in TUI (default on)", default: true },
     pollMs: { type: "string", label: "Client poll interval (ms)", default: "800" },
+    // The client reaches bb over loopback by default. Set this when the TUI
+    // runs somewhere the server's own loopback URL does not resolve — another
+    // machine, a container, a tunnel.
+    serverUrl: {
+      type: "string",
+      label: "Server URL advertised to the TUI (blank = this server's loopback URL)",
+      default: "",
+    },
+    // Spawn target for the client's alternate new-thread shortcut. Blank falls
+    // back to the project's own defaults, which is what most setups want.
+    spawnProvider: { type: "string", label: "Alternate spawn provider (blank = project default)", default: "" },
+    spawnModel: { type: "string", label: "Alternate spawn model (blank = project default)", default: "" },
   });
   const cfg = await settings.get();
   const retentionDays = Math.max(1, Number.parseInt(cfg.retentionDays ?? "7", 10) || 7);
@@ -164,13 +197,24 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (err) {
       bb.log.warn(`system.version failed: ${String(err)}`);
     }
+    // Re-read rather than closing over the factory's snapshot: `bb tui info` is
+    // a once-per-client-start call, and a settings save does not reload a
+    // healthy plugin, so a stale snapshot would strand the user's edit.
+    const live = await settings.get();
+    const advertised = (live.serverUrl ?? "").trim();
+    const provider = (live.spawnProvider ?? "").trim();
+    const model = (live.spawnModel ?? "").trim();
     return {
-      serverUrl: bb.server.loopbackBaseUrl,
+      serverUrl: advertised === "" ? bb.server.loopbackBaseUrl : advertised,
       dataDir: process.env.BB_DATA_DIR ?? "~/.bb",
       version,
-      pluginVersion: "0.1.0",
+      pluginVersion: PLUGIN_VERSION,
       retentionDays,
       prefs: { hideReasoning, pollMs },
+      spawn:
+        provider === "" && model === ""
+          ? null
+          : { provider: provider === "" ? null : provider, model: model === "" ? null : model },
     };
   }
 
@@ -253,8 +297,24 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     async getTimeline({ threadId }) {
-      const res = await bb.sdk.threads.timeline({ threadId });
-      return { items: res.rows as unknown[] };
+      // Both ride the timeline call the client already polls, so plan mode and
+      // the execution options cost no extra round trip.
+      const [res, exec] = await Promise.all([
+        bb.sdk.threads.timeline({ threadId }),
+        bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null),
+      ]);
+      const plan = res.activePromptMode;
+      return {
+        items: res.rows as unknown[],
+        planMode: plan ? { prompt: plan.prompt } : null,
+        execution: exec
+          ? {
+              model: exec.model,
+              permissionMode: exec.permissionMode,
+              reasoningLevel: exec.reasoningLevel,
+            }
+          : null,
+      };
     },
 
     eventsSince({ afterSeq, limit, threadId }) {

@@ -4,16 +4,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/../client"
 
-PROJECT="${PROJECT:-proj_m8bt3ak4h3}"   # default: Personal (this host)
+# Required: the project to spawn the throwaway thread in (`bb project list`).
+PROJECT="${PROJECT:?set PROJECT to a bb project id, e.g. PROJECT=proj_xxx $0}"
 WATCH_SECS="${WATCH_SECS:-30}"
-# Pi routes through the user's opencode-go subscription (zen/go). The
-# `opencode/*` (zen) catalog is billing-blocked on this host (CreditsError).
-PROVIDER="${PROVIDER:-pi}"
-MODEL="${MODEL:-opencode-go/deepseek-v4-flash}"
+# Optional. Left blank, the thread spawns with the project's own defaults —
+# pick a cheap model here if you run this often.
+PROVIDER="${PROVIDER:-}"
+MODEL="${MODEL:-}"
 PROMPT="${PROMPT:-Write 200 short numbered sentences about terminal design. End with the exact line: DEMO_COMPLETE.}"
 
-echo "== spawning hidden test thread ($PROVIDER / $MODEL) =="
-SPAWN=$(bb thread spawn --project "$PROJECT" --prompt "$PROMPT" --provider "$PROVIDER" --model "$MODEL" --visibility hidden --json)
+echo "== spawning hidden test thread (${PROVIDER:-project default} / ${MODEL:-project default}) =="
+SPAWN=$(bb thread spawn --project "$PROJECT" --prompt "$PROMPT" --visibility hidden --json \
+  ${PROVIDER:+--provider "$PROVIDER"} ${MODEL:+--model "$MODEL"})
 TID=$(echo "$SPAWN" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 echo "thread: $TID"
 

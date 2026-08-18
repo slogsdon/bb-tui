@@ -4,12 +4,23 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { TranscriptBlock } from "./markdown.js";
 
 const execFileP = promisify(execFile);
+
+export type { TranscriptBlock };
 
 export interface ClientPrefs {
   hideReasoning: boolean;
   pollMs: number;
+}
+
+/** Optional spawn target for the alternate new-thread shortcut, configured with
+ * `bb plugin config bb-tui set spawnProvider|spawnModel`. Null, or a null
+ * field, means the project's own default is used. */
+export interface SpawnTarget {
+  provider: string | null;
+  model: string | null;
 }
 
 export interface ClientInfo {
@@ -19,6 +30,7 @@ export interface ClientInfo {
   pluginVersion: string;
   retentionDays: number;
   prefs: ClientPrefs;
+  spawn?: SpawnTarget | null;
 }
 
 export interface ThreadRow {
@@ -34,6 +46,9 @@ export interface ThreadRow {
   archivedAt: string | null;
   updatedAt?: number;
   createdAt?: number;
+  environmentBranchName?: string | null;
+  environmentHostId?: string | null;
+  hasPendingInteraction?: boolean;
   [k: string]: unknown;
 }
 
@@ -94,6 +109,7 @@ async function discoverFresh(): Promise<ClientInfo> {
       pluginVersion: "?",
       retentionDays: 0,
       prefs: { hideReasoning: true, pollMs: 800 },
+      spawn: null,
     };
   }
   try {
@@ -118,6 +134,7 @@ async function discoverFresh(): Promise<ClientInfo> {
     pluginVersion: "?",
     retentionDays: 0,
     prefs: { hideReasoning: true, pollMs: 800 },
+    spawn: null,
   };
 }
 
@@ -140,7 +157,24 @@ export function listThreads(info: ClientInfo, projectId?: string, limit = 100): 
   return rpc(info.serverUrl, "listThreads", { projectId, limit });
 }
 
-export function getTimeline(info: ClientInfo, threadId: string): Promise<{ items: unknown[] }> {
+/** Execution options the thread's next turn will use. bb resolves these from
+ * the last turn request, the sticky thread setting, and the project default —
+ * so this is the only honest source for what the model actually is. */
+export interface Execution {
+  model: string;
+  permissionMode: string;
+  reasoningLevel: string;
+}
+
+export interface Timeline {
+  items: unknown[];
+  /** Non-null while the provider is in plan mode. Entering it is the agent's
+   * move, not bb's — `bb thread cancel-plan` is the only side bb exposes. */
+  planMode?: { prompt: string } | null;
+  execution?: Execution | null;
+}
+
+export function getTimeline(info: ClientInfo, threadId: string): Promise<Timeline> {
   return rpc(info.serverUrl, "getTimeline", { threadId });
 }
 
@@ -163,6 +197,36 @@ export async function bbJson<T>(args: string[]): Promise<T> {
 
 export async function listProjects(): Promise<Project[]> {
   return bbJson<Project[]>(["project", "list"]);
+}
+
+export interface Machine {
+  id: string;
+  name: string;
+  status?: string;
+  [k: string]: unknown;
+}
+
+/** Execution machines, for turning a thread's environmentHostId into a name. */
+export async function listMachines(): Promise<Machine[]> {
+  return bbJson<Machine[]>(["machine", "list"]);
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  description?: string;
+  scope?: string;
+  [k: string]: unknown;
+}
+
+/** Skills bb knows about, for slash completion. Project-scoped, since project
+ * skills override user and builtin ones. Cached by caller: the menu filters on
+ * every keystroke and this is a ~300ms subprocess. */
+export async function listSkills(projectId?: string): Promise<Skill[]> {
+  const args = ["skill", "list"];
+  if (projectId) args.push("--project", projectId);
+  const res = await bbJson<{ skills?: Skill[] } | Skill[]>(args);
+  return Array.isArray(res) ? res : (res.skills ?? []);
 }
 
 export interface SpawnResult {
@@ -195,6 +259,10 @@ export function stopThread(threadId: string): Promise<unknown> {
 
 export function compactThread(threadId: string): Promise<unknown> {
   return bbJson(["thread", "compact", threadId]);
+}
+
+export function cancelPlan(threadId: string): Promise<unknown> {
+  return bbJson(["thread", "cancel-plan", threadId]);
 }
 
 export function setThreadModel(threadId: string, model: string): Promise<unknown> {
@@ -258,8 +326,11 @@ export function eventActivityLabel(e: BufferedEvent): string | null {
   }
 }
 
-/** Extract readable lines from a timeline row (recursive). */
-export function timelineLines(row: unknown, acc: string[] = []): string[] {
+/** Flatten a timeline row into role-tagged transcript blocks (recursive).
+ * Blocks keep their raw markdown — the renderer, not this layer, decides how
+ * text is styled and wrapped. Tool/work rows carry their nesting depth so the
+ * pane can draw them as children of the call that produced them. */
+export function timelineBlocks(row: unknown, acc: TranscriptBlock[] = [], depth = 0): TranscriptBlock[] {
   const r = row as {
     kind?: string;
     role?: string;
@@ -270,16 +341,19 @@ export function timelineLines(row: unknown, acc: string[] = []): string[] {
   };
   if (r == null || typeof r !== "object") return acc;
   if (r.kind === "conversation") {
-    const tag = r.role === "user" ? "U" : r.role === "assistant" ? "A" : "S";
-    acc.push(`${tag}: ${r.text ?? ""}`);
+    const role = r.role === "user" ? "user" : r.role === "assistant" ? "agent" : "system";
+    if ((r.text ?? "").trim()) acc.push({ role, text: r.text ?? "" });
   } else if (r.kind === "turn") {
-    acc.push(`— turn ${r.summary ? r.summary.slice(0, 200) : ""}`);
+    // A turn boundary with nothing to say needs no row; blocks are already
+    // separated by a blank line.
+    if (r.summary) acc.push({ role: "system", text: r.summary });
   } else if (typeof r.summary === "string" && r.summary) {
-    acc.push(`[${r.kind ?? "work"}] ${r.summary.slice(0, 200)}`);
+    acc.push({ role: "work", text: r.summary, depth });
   } else if (r.error) {
-    acc.push(`[error] ${r.error}`);
+    acc.push({ role: "system", text: `error: ${r.error}` });
   }
-  for (const c of r.children ?? []) timelineLines(c, acc);
+  const childDepth = r.kind === "conversation" || r.kind === "turn" ? 0 : depth + 1;
+  for (const c of r.children ?? []) timelineBlocks(c, acc, childDepth);
   return acc;
 }
 

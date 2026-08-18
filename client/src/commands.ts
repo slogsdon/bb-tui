@@ -1,0 +1,72 @@
+// Slash handling. Two independent rules that happen to share a prefix:
+//
+//   menu       the token at the cursor starts with "/"  -> live, per keystroke
+//   execution  the whole message is "/name …"           -> on send
+//
+// A message that merely contains /compact mid-sentence offers the menu while
+// typing and still sends as ordinary text. That mirrors bb.app, where accepting
+// a skill inserts text the agent resolves, while a message that *is* /compact
+// becomes a bb operation.
+//
+// bb owns this namespace, not the TUI: `/` reaches bb commands, bb skills, and
+// whatever the provider itself defines. So unknown names are never blocked —
+// they pass through untouched.
+
+/** Commands bb resolves client-side and that `bb thread tell` cannot express.
+ * Everything else — skills, provider commands — is passthrough. */
+export const BB_COMMAND_NAMES = ["compact", "cancel-plan"] as const;
+
+export type Resolution =
+  | { kind: "command"; name: string; args: string }
+  | { kind: "text"; text: string };
+
+const WHOLE_COMMAND = /^\/([a-z0-9][a-z0-9:_-]*)(?:\s+([\s\S]*))?$/i;
+
+/** Decide what a composed message means, at send time. */
+export function resolveSlash(input: string): Resolution {
+  const text = input.trim();
+  // `//name` escapes: send a literal leading slash.
+  if (text.startsWith("//")) return { kind: "text", text: text.slice(1) };
+  const match = WHOLE_COMMAND.exec(text);
+  if (!match) return { kind: "text", text };
+  const name = (match[1] ?? "").toLowerCase();
+  if (!(BB_COMMAND_NAMES as readonly string[]).includes(name)) return { kind: "text", text };
+  return { kind: "command", name, args: (match[2] ?? "").trim() };
+}
+
+export type CatalogEntry = {
+  kind: "command" | "skill";
+  name: string;
+  description: string;
+};
+
+const COMMAND_ENTRIES: CatalogEntry[] = [
+  { kind: "command", name: "compact", description: "Compact context" },
+  { kind: "command", name: "cancel-plan", description: "Exit plan mode" },
+];
+
+/** Merge bb commands with the skills bb knows about. Users do not care which
+ * layer resolves a name, so both share one list. */
+export function buildCatalog(skills: Array<{ name: string; description?: string }>): CatalogEntry[] {
+  const seen = new Set(COMMAND_ENTRIES.map((e) => e.name));
+  const skillEntries = skills
+    .filter((s) => s.name && !seen.has(s.name))
+    .map((s) => ({ kind: "skill" as const, name: s.name, description: s.description ?? "" }));
+  return [...COMMAND_ENTRIES, ...skillEntries];
+}
+
+/** Entries matching a slash token, commands first. The token includes its
+ * leading slash; an empty token (a bare "/") matches everything, which is what
+ * makes the menu appear the moment you type it. */
+export function matchEntries(catalog: CatalogEntry[], token: string): CatalogEntry[] {
+  const needle = token.replace(/^\//, "").toLowerCase();
+  const hit = (entry: CatalogEntry) => needle === "" || entry.name.toLowerCase().includes(needle);
+  const rank = (entry: CatalogEntry) => {
+    if (entry.kind === "command") return 0;
+    // Prefix matches are what the user is most likely reaching for.
+    return entry.name.toLowerCase().startsWith(needle) ? 1 : 2;
+  };
+  return catalog
+    .filter(hit)
+    .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+}

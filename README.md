@@ -1,57 +1,88 @@
 # bb-tui
 
-A terminal UI around the bb ecosystem. **Phase 1 spike complete** — see
-[DESIGN.md](./DESIGN.md) for the full rationale.
+A terminal UI for [bb](https://getbb.app). Browse every thread across your
+projects, follow a running agent's output as it streams, and reply — without
+leaving the terminal.
+
+It is two pieces: a **bb plugin** that runs inside your bb server and buffers
+thread events, and an **Ink client** that renders them. The plugin is what makes
+the client cheap — it turns bb's realtime firehose into a monotonic, cursorable
+event log the TUI can poll and resume from.
+
+```
+┌ threads ────────┐┌ thread ─────────────────────────────────┐
+│ ▾ my-project 3  ││ Fix the flaky parser test               │
+│   ● Fix the fl  ││                                         │
+│   ○ Add --ver   ││ I found the race: the fixture rebuilds  │
+│ ▾ notes 1       ││ the index while the test reads it.      │
+│   ○ Draft the   ││                                         │
+│                 ││ ▼ bottom · my-project · auto · idle     │
+│                 ││┌ MESSAGE ─────────────────────────────┐ │
+│                 │││ Type a message…                      │ │
+│                 ││└──────────────────────────────────────┘ │
+└─────────────────┘└─────────────────────────────────────────┘
+```
 
 ## Status
 
-- ✅ Plugin backend (`bb-plugin-bb-tui`): installed on this host, RPC
-  (`getClientInfo` / `listThreads` / `getTimeline` / `eventsSince` with per-thread
-  filter), CLI discovery (`bb tui info`), event buffer service (SQLite,
-  realtime-driven), prefs (`bb plugin config bb-tui set hideReasoning|pollMs …`).
-- ✅ Client (Ink, Phase 2+): app-style split layout — left list (threads grouped
-  under their project with fold markers and counts, content markers, colored
-  status dots), right thread pane (header, streaming transcript, bordered
-  composer); markdown rendering (headings, lists with hanging indents, fenced
-  code, quotes, tables, inline emphasis) tolerant of half-streamed text;
-  adaptive 30% thread list capped at 44 columns; single focused pane below 72
-  columns; contextual shortcuts below pane borders; `tab` switches focus;
-  `←/→` folds a project; `/` filters by thread or project title; right-aligned
-  branch/machine column (live activity while a thread runs); composer context
-  line (project · machine · branch · model · permission mode · turn elapsed);
-  a plan-mode banner while the provider is planning; per-thread
-  cursors; archived threads excluded; discovery cached; status refreshes
-  event-gated. See [Keys](#keys).
-  Set `BB_TUI_DEBUG=1` to append buffer counters to the context line.
-- ⏭ Next: Phase 3 — terminals panes, queue UX, bundled single-file client.
+Early but usable day to day. Threads, streaming, markdown, slash commands, and
+the composer all work; terminals and queue UX do not exist yet.
 
-## Pi provider note
+- **Plugin** — RPC (`getClientInfo` / `listThreads` / `getTimeline` /
+  `eventsSince`), a `bb tui info` discovery command, and a background service
+  that drains thread events into SQLite.
+- **Client** — split layout: threads grouped under their project with fold
+  markers and counts, and a thread pane with a streaming transcript, markdown
+  rendering, a slash-command menu, and a bordered composer.
+- **Not yet** — terminal panes, queue UX, a bundled single-file client.
 
-bb's pi provider catalogs: `opencode/*` (zen) is billing-blocked on this host
-(CreditsError 401); `opencode-go/*` (zen/go) is your paid subscription —
-verified working. Use `opencode-go/deepseek-v4-flash` (cheapest), or
-`opencode-go/{minimax-m3,qwen3.7-plus}`.
+## Requirements
 
-## Run
+- bb `>=0.38` running locally (the bb app or the `bb` daemon)
+- Node.js 20+
+
+## Install
 
 ```sh
-# plugin (server side)
-cd bb-plugin-bb-tui
-bb plugin install . --yes          # once; path-installed
-bb plugin reload bb-tui            # after edits
+git clone https://github.com/slogsdon/bb-tui.git
+cd bb-tui
 
-# client (terminal side)
-cd client
-npm install
-npx tsx src/cli.ts info            # headless: discovery facts
-npx tsx src/cli.ts list            # headless: thread list
-npx tsx src/cli.ts watch --thread <id>   # headless: follow buffered events
-npm test                                 # layout + terminal lifecycle tests
-npx tsx src/index.tsx              # interactive TUI
+# 1. the plugin, into your bb server
+bb plugin install ./bb-plugin-bb-tui --yes
+
+# 2. the client
+cd client && npm install
+npx tsx src/index.tsx
 ```
 
-Requires a bb server on loopback (the bb app or `bb` daemon). Discovery:
-`bb tui info` → `~/.bb/bb-app-runtime.json` → `BB_TUI_SERVER_URL` override.
+There is also a headless CLI, useful for scripting and for checking that the
+plugin is reachable before you open the UI:
+
+```sh
+npx tsx src/cli.ts info                  # discovery facts
+npx tsx src/cli.ts list                  # thread list
+npx tsx src/cli.ts watch --thread <id>   # follow buffered events
+```
+
+## Configuration
+
+Plugin settings, via `bb plugin config bb-tui set <key> <value>`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `serverUrl` | *(blank)* | URL the client should connect to. Blank means this server's own loopback URL. Set it when the TUI runs where that URL does not resolve — another machine, a container, a tunnel. |
+| `retentionDays` | `7` | How long buffered events are kept. |
+| `pollMs` | `800` | How often the client polls for new events. |
+| `hideReasoning` | `true` | Suppress reasoning deltas in the transcript. |
+| `spawnProvider` | *(blank)* | Provider for the alternate new-thread shortcut. Blank uses the project's default. |
+| `spawnModel` | *(blank)* | Model for the alternate new-thread shortcut. Blank uses the project's default. |
+
+Settings apply to the next client start — no `bb plugin reload` needed.
+
+The client finds the server in this order: `BB_TUI_SERVER_URL`, then
+`bb tui info`, then `~/.bb/bb-app-runtime.json`. The environment variable is the
+escape hatch for a client running where the `bb` CLI is not installed.
+`BB_TUI_DEBUG=1` appends buffer counters to the context line.
 
 ## Keys
 
@@ -156,10 +187,33 @@ is Enter, and `ctrl-k` is kill-line, so compact and model take `ctrl-t` and
   renders one throwaway frame instead, which differs from both its neighbours
   and so forces two writes, the second repainting everything.
 
-## Layout
+## Repository layout
 
 ```
-bb-plugin-bb-tui/    bb plugin (server entry: rpc, settings, storage, cli, buffer service)
+bb-plugin-bb-tui/    bb plugin: rpc, settings, storage, cli, buffer service
 client/              Ink TUI + headless CLI (TypeScript)
-DESIGN.md            architecture + validation + spike results
+scripts/demo.sh      end-to-end smoke test against a live bb
+DESIGN.md            architecture notes and what the spike established
 ```
+
+## Development
+
+```sh
+cd client
+npm test          # unit tests (node:test)
+npm run typecheck # tsc --noEmit
+
+cd ../bb-plugin-bb-tui
+bb plugin dev     # watch loop: reload on save
+```
+
+The client's rendering logic is deliberately pure and unit-tested —
+`markdown.ts`, `composer.ts`, and `commands.ts` know nothing about Ink or bb, so
+they are testable without a terminal or a server. `layout.tsx` renders them.
+
+Contributions are welcome. There is no CLA and no required issue template; a PR
+with a test is plenty.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

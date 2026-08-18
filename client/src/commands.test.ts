@@ -44,9 +44,10 @@ test("a doubled slash escapes to a literal one", () => {
 
 test("plain text is untouched", () => {
   assert.deepEqual(resolveSlash("hello"), { kind: "text", text: "hello" });
-  assert.deepEqual(resolveSlash("/Users/shane/notes"), {
+  // A leading slash is far more often a path than a command.
+  assert.deepEqual(resolveSlash("/etc/hosts is the file"), {
     kind: "text",
-    text: "/Users/shane/notes",
+    text: "/etc/hosts is the file",
   });
 });
 
@@ -84,5 +85,5 @@ test("matching is case-insensitive and prefers prefix matches", () => {
 });
 
 test("a token matching nothing yields nothing, which is what hides the menu", () => {
-  assert.deepEqual(matchEntries(buildCatalog(skills), "/Users"), []);
+  assert.deepEqual(matchEntries(buildCatalog(skills), "/nonesuch"), []);
 });

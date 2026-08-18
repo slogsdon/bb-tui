@@ -75,7 +75,7 @@ test("a slash inside a word never opens the menu", () => {
 
 test("an absolute path is a slash token, and stays one", () => {
   // It opens the menu; zero matches is what hides it again.
-  assert.deepEqual(slashTokenAt(at("/Users/shane")), { text: "/Users/shane", start: 0, end: 12 });
+  assert.deepEqual(slashTokenAt(at("/usr/local")), { text: "/usr/local", start: 0, end: 10 });
 });
 
 test("accepting an entry replaces the token in place, without doubling the space", () => {

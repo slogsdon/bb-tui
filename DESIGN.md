@@ -33,8 +33,8 @@ via a `marketplace.json`.
   Enough to note: the server serves the SPA, `/api/v1`, and `/ws`; a host daemon per
   enrolled machine (`host-daemon/dist/daemon-bundle.mjs`) handles remote execution.
 - Agents are **provider bridge subprocesses**, not bb-internal: `bb-pi-bridge.mjs`,
-  `bb-claude-code-bridge.mjs`, and friends are running today on this host. Each pi
-  thread writes JSONL under `~/.bb/pi-bridge-sessions/thr_*.jsonl`.
+  `bb-claude-code-bridge.mjs`, and friends. Each pi thread writes JSONL under
+  `~/.bb/pi-bridge-sessions/thr_*.jsonl`.
 - The `bb` CLI is the sanctioned scripting surface. **Every command supports `--json`.**
   It is the same surface agents use (this session runs against it), so it is exercised
   and stable.
@@ -290,8 +290,8 @@ Phase 2 — usable TUI ✅ (this pass):
    assembled per `(threadId, itemId)` and rendered live beneath the getTimeline
    history; reasoning deltas (`item/reasoning/*`) suppressed by default (plugin
    pref, `r` toggles); thread actions `x` stop / `c` compact / `m` model picker
-   (hints from `bb provider models`); spawn defaults to pi/opencode-go
-   (`d` = project defaults); cursors scoped per thread + persisted to
+   (hints from `bb provider models`); spawn uses the configured spawn target
+   when one is set (`d` = project defaults); cursors scoped per thread + persisted to
    `~/.local/state/bb-tui/cursor.json`; per-thread `eventsSince` filter added
    (server-side) so busy servers don't force backlog pagination.
 5. Settings + prefs via plugin: `bb plugin config bb-tui set hideReasoning …` /
@@ -359,8 +359,8 @@ Phase 3 — polish:
   returns `unknown_method` / input-validation envelopes, never auth errors.
 - Plugin CLI contract is buffered, capped 1 MiB, executes server-side
   (`bb.plugin-authoring` skill, `bb.cli` section).
-- Providers on this host: codex, claude-code, pi (full-only permission mode),
-  acp-cursor, acp-hermes-agent; ACP auto-discovery for opencode/omp/grok/hermes.
+- Providers are per-installation; bb reports them via `bb provider list`. Some
+  (pi at the time of writing) support only the `full` permission mode.
 - Model catalogs are provider-reported per machine, with `isDefault`,
   reasoning efforts, `defaultReasoningEffort`.
 - Threads support parent-child, fork (worktree/reuse), hidden workers, sections,
@@ -372,14 +372,9 @@ Phase 3 — polish:
 
 ### Spike-verified facts (Phase 2)
 
-- The pi provider's models are the pi-ai catalogs: `opencode/*` (baseUrl
-  `https://opencode.ai/zen`) and `opencode-go/*` (baseUrl
-  `https://opencode.ai/zen/go`), both authed by `OPENCODE_API_KEY` from
-  `~/.bb/env.json`. On this host the `zen` workspace is billing-blocked
-  (CreditsError 401 — opencode.ai/workspace balance); `zen/go` works: verified
-  `opencode-go/deepseek-v4-flash` answering a live turn. Use `opencode-go/*` for
-  pi; cheap options: `opencode-go/deepseek-v4-flash` (0.14/0.28),
-  `opencode-go/minimax-m3` (0.3/1.2), `opencode-go/qwen3.7-plus` (0.4/1.6).
+- Model catalogs are per provider and per machine; a model id that works on one
+  installation may not exist on another, which is why the spawn target is a
+  setting rather than a constant.
 - `bb plugin config bb-tui set <key> <value>` + `bb plugin reload bb-tui` applies
   settings live (no app needed).
 - Timeline rows from `bb.sdk.threads.timeline` are flat here (children: null)

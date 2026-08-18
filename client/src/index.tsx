@@ -34,6 +34,7 @@ import {
   type Project,
   type ThreadRow,
   type Timeline,
+  type TimelineCoverage,
 } from "./api.js";
 import { calculatePaneLayout, WorkspaceLayout, type ListRow } from "./layout.js";
 import { renderBlocks, type TranscriptBlock } from "./markdown.js";
@@ -283,7 +284,10 @@ export default function App() {
           const next = [...tailRef.current, ...fresh].slice(-MAX_TAIL);
           tailRef.current = next;
           setTail(next);
-          assembleTranscripts(fresh);
+          // Only the focused thread: the map is read with that thread's prefix
+          // and nothing else, so text for background threads is unreachable
+          // growth. List markers read `tail`, not this.
+          if (focusId) assembleTranscripts(fresh.filter((e) => e.threadId === focusId));
           // Turn clock for the open thread: how long has it been working.
           for (const e of fresh) {
             if (focusId && e.threadId !== focusId) continue;
@@ -304,7 +308,7 @@ export default function App() {
           lastTimelineRefreshRef.current = now;
           try {
             const tl = await getTimeline(info, focusId);
-            applyTimeline(tl);
+            applyTimeline(focusId, tl);
             setExecution(tl.execution ?? null);
             setPlanMode(tl.planMode ?? null);
           } catch {
@@ -385,9 +389,24 @@ export default function App() {
   }
 
   /** Timeline blocks plus the coverage the live delta layer is filtered by. */
-  function applyTimeline(tl: Timeline) {
+  function applyTimeline(threadId: string, tl: Timeline) {
+    const cov = timelineCoverage(tl.items);
     setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
-    setCoverage(timelineCoverage(tl.items));
+    setCoverage(cov);
+    pruneTranscripts(threadId, cov);
+  }
+
+  /** Coverage only ever moves forward, so an entry it accounts for can never be
+   * rendered again. Dropping exactly the set the transcript filter rejects is
+   * safe by construction and keeps the map at roughly one turn's worth. */
+  function pruneTranscripts(threadId: string, cov: TimelineCoverage) {
+    const prefix = `${threadId}::`;
+    for (const map of [transcriptsRef.current, reasoningRef.current]) {
+      for (const [k, v] of map) {
+        if (!k.startsWith(prefix)) continue;
+        if (coveredByTimeline(cov, k.slice(prefix.length), v.ts)) map.delete(k);
+      }
+    }
   }
 
   function refreshThreadStatuses() {
@@ -403,6 +422,9 @@ export default function App() {
     setFocus("detail");
     setTimeline([]);
     setCoverage(timelineCoverage([]));
+    // Nothing from the thread we just left is reachable again.
+    transcriptsRef.current.clear();
+    reasoningRef.current.clear();
     setExecution(null);
     setPlanMode(null);
     setComposer(EMPTY);
@@ -414,7 +436,7 @@ export default function App() {
       .catch(() => setCatalog(buildCatalog([])));
     try {
       const tl = await getTimeline(info!, t.id);
-      applyTimeline(tl);
+      applyTimeline(t.id, tl);
       setExecution(tl.execution ?? null);
       setPlanMode(tl.planMode ?? null);
       const evs = tailRef.current.filter((e) => e.threadId === t.id);

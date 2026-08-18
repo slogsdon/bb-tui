@@ -4,6 +4,7 @@ import { Writable } from "node:stream";
 import React from "react";
 import { render } from "ink";
 import type { ThreadRow } from "./api.js";
+import { renderBlocks } from "./markdown.js";
 import {
   calculatePaneLayout,
   contextRow,
@@ -371,6 +372,38 @@ test("command menu height follows the visible window and includes its border", (
   assert.equal(menuHeight({ entries: entries.slice(0, 2), selected: 0, firstVisible: 0 }), 5);
   assert.equal(menuHeight({ entries, selected: 5, firstVisible: 0 }), 10);
   assert.equal(menuHeight({ entries, selected: 7, firstVisible: 2 }), 9);
+});
+
+test("thread pane preserves authored Markdown paragraph rows", () => {
+  const frame = renderFrame(
+    <ThreadPane
+      thread={sampleThread}
+      projectName="bb-tui"
+      elapsedSeconds={null}
+      hostNames={new Map()}
+      detailLines={renderBlocks(
+        [
+          {
+            role: "agent",
+            text: "First paragraph.\n\nSecond paragraph.\n\n- item one\n- item two\n\nFinal paragraph.",
+          },
+        ],
+        76,
+      )}
+      scrollUp={0}
+      composer={emptyComposer}
+      focus="detail"
+      width={80}
+      height={28}
+    />,
+    80,
+    28,
+  );
+  const rows = frame.split("\n");
+  const rowOf = (text: string) => rows.findIndex((row) => row.includes(text));
+
+  assert.equal(rowOf("Second paragraph.") - rowOf("First paragraph."), 2);
+  assert.equal(rowOf("Final paragraph.") - rowOf("• item two"), 2);
 });
 
 test("workspace renders shortcuts below both pane borders", () => {

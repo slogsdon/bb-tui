@@ -285,24 +285,30 @@ export function ThreadPane(props: ThreadPaneProps) {
       </Text>
       <Box flexDirection="column" height={visibleCount} overflow="hidden">
         {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
-        {visible.map((line, index) => (
-          <Text key={from + index} wrap="truncate">
-            {/* A blank block separator still has to occupy a row. */}
-            {line.spans.length === 0
-              ? " "
-              : line.spans.map((span, spanIndex) => (
-                  <Text
-                    key={spanIndex}
-                    bold={span.bold}
-                    italic={span.italic}
-                    dimColor={span.dim}
-                    color={span.color}
-                  >
-                    {span.text}
-                  </Text>
-                ))}
-          </Text>
-        ))}
+        {visible.map((line, index) =>
+          line.spans.every((span) => span.text.trim() === "") ? (
+            // A blank MdLine may contain only zero-width padding spans; Ink
+            // gives the resulting Text zero height. The Box consumes the row
+            // already budgeted for the separator in visibleCount.
+            <Box key={from + index} minHeight={1} flexShrink={0}>
+              <Text> </Text>
+            </Box>
+          ) : (
+            <Text key={from + index} wrap="truncate">
+              {line.spans.map((span, spanIndex) => (
+                <Text
+                  key={spanIndex}
+                  bold={span.bold}
+                  italic={span.italic}
+                  dimColor={span.dim}
+                  color={span.color}
+                >
+                  {span.text}
+                </Text>
+              ))}
+            </Text>
+          ),
+        )}
       </Box>
       {/* Context, not counters: where this thread runs and what it is doing. */}
       <Text dimColor wrap="truncate">

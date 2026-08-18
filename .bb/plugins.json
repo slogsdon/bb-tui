@@ -1,0 +1,6 @@
+{
+  "$schema": "https://getbb.app/schemas/plugins.schema.json",
+  "schemaVersion": 1,
+  "name": "bb-tui",
+  "plugins": [{ "name": "bb-tui", "source": "./bb-plugin-bb-tui" }]
+}

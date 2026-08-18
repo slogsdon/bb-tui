@@ -48,11 +48,17 @@ git clone https://github.com/slogsdon/bb-tui.git
 cd bb-tui
 
 # 1. the plugin, into your bb server
-bb plugin install ./bb-plugin-bb-tui --yes
+bb plugin install path:. --plugin bb-tui --yes
 
 # 2. the client
 cd client && npm install
 npx tsx src/index.tsx
+```
+
+To track releases instead of a checkout, install straight from git:
+
+```sh
+bb plugin install git:https://github.com/slogsdon/bb-tui.git@^0.1.0 --plugin bb-tui
 ```
 
 There is also a headless CLI, useful for scripting and for checking that the

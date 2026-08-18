@@ -52,14 +52,7 @@ function insert(state: Composer, chunk: string): Composer {
 export function applyKey(state: Composer, data: string, key: KeyFlags): Composer {
   if (key.leftArrow) return withCursor(state, state.cursor - 1);
   if (key.rightArrow) return withCursor(state, state.cursor + 1);
-  if (key.backspace) return eraseBefore(state);
-  if (key.delete) {
-    if (state.cursor >= state.text.length) return state;
-    return {
-      text: state.text.slice(0, state.cursor) + state.text.slice(state.cursor + 1),
-      cursor: state.cursor,
-    };
-  }
+  if (key.backspace || key.delete) return eraseBefore(state);
 
   if (key.ctrl) {
     switch (data) {

@@ -29,9 +29,10 @@ test("control bytes are dropped but newlines survive", () => {
   assert.equal(state.text, "ab\nc");
 });
 
-test("backspace deletes before the cursor, delete deletes at it", () => {
+test("Ink backspace and delete flags both erase before the cursor", () => {
   assert.deepEqual(applyKey(at("abc", 2), "", { backspace: true }), { text: "ac", cursor: 1 });
-  assert.deepEqual(applyKey(at("abc", 1), "", { delete: true }), { text: "ac", cursor: 1 });
+  assert.deepEqual(applyKey(at("abc"), "", { delete: true }), { text: "ab", cursor: 2 });
+  assert.deepEqual(applyKey(at("abc", 2), "", { delete: true }), { text: "ac", cursor: 1 });
 });
 
 test("erase bytes in the data chunk are honoured too", () => {

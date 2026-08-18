@@ -326,6 +326,46 @@ export function eventActivityLabel(e: BufferedEvent): string | null {
   }
 }
 
+/** The provider item id embedded in a timeline row id
+ * (`thr_x:assistant:…|item:pi-assistant-103` -> `pi-assistant-103`). Deltas are
+ * keyed by that bare id, so it is the only reliable join between the two. */
+export function rowItemId(id: unknown): string | null {
+  const m = typeof id === "string" ? /\|item:([^|]+)$/.exec(id) : null;
+  return m ? (m[1] ?? null) : null;
+}
+
+/** What the server timeline already accounts for. The buffered-event layer
+ * retains every delta back to the retention window — far more history than the
+ * timeline page shows — so replaying all of it appends the whole conversation a
+ * second time, out of order, below the timeline. The pane keeps a locally
+ * assembled item only when the timeline neither contains that item nor covers
+ * its point in time. */
+export interface TimelineCoverage {
+  itemIds: Set<string>;
+  newestTs: number;
+}
+
+export function timelineCoverage(items: unknown[]): TimelineCoverage {
+  const itemIds = new Set<string>();
+  let newestTs = 0;
+  for (const it of items) {
+    const r = it as { id?: unknown; createdAt?: unknown } | null;
+    const id = rowItemId(r?.id);
+    if (id) itemIds.add(id);
+    if (typeof r?.createdAt === "number") newestTs = Math.max(newestTs, r.createdAt);
+  }
+  return { itemIds, newestTs };
+}
+
+/** Whether the timeline already accounts for a locally assembled item — it
+ * carries that item, or it covers that item's point in time. The transcript
+ * filter and the prune are the same question asked twice, so they share one
+ * answer: anything covered is never rendered again, and is therefore safe to
+ * drop. Keep them on this function. */
+export function coveredByTimeline(cov: TimelineCoverage, itemId: string, ts: number): boolean {
+  return cov.itemIds.has(itemId) || ts <= cov.newestTs;
+}
+
 /** Flatten a timeline row into role-tagged transcript blocks (recursive).
  * Blocks keep their raw markdown — the renderer, not this layer, decides how
  * text is styled and wrapped. Tool/work rows carry their nesting depth so the

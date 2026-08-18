@@ -8,6 +8,7 @@ import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
   cancelPlan,
   compactThread,
+  coveredByTimeline,
   discover,
   eventActivityLabel,
   eventsSince,
@@ -25,12 +26,14 @@ import {
   tellThread,
   threadShow,
   timelineBlocks,
+  timelineCoverage,
   type BufferedEvent,
   type ClientInfo,
   type EventsPage,
   type Execution,
   type Project,
   type ThreadRow,
+  type Timeline,
 } from "./api.js";
 import { calculatePaneLayout, WorkspaceLayout, type ListRow } from "./layout.js";
 import { renderBlocks, type TranscriptBlock } from "./markdown.js";
@@ -132,6 +135,10 @@ export default function App() {
   const [focus, setFocus] = useState<"list" | "detail">("list");
   const [tail, setTail] = useState<BufferedEvent[]>([]);
   const [timeline, setTimeline] = useState<TranscriptBlock[]>([]);
+  const [coverage, setCoverage] = useState(() => timelineCoverage([]));
+  // Optimistic user messages, deduped against the timeline. State, not a ref:
+  // the transcript has to repaint the moment one is appended.
+  const [userMsgs, setUserMsgs] = useState<Map<string, string[]>>(new Map());
   const [execution, setExecution] = useState<Execution | null>(null);
   const [planMode, setPlanMode] = useState<{ prompt: string } | null>(null);
   const [composer, setComposer] = useState<Composer>(EMPTY);
@@ -155,9 +162,10 @@ export default function App() {
   const threadCursorRef = useRef(new Map<string, number>());
   const seenSeqRef = useRef(new Set<number>());
   const tailRef = useRef<BufferedEvent[]>([]);
-  const transcriptsRef = useRef(new Map<string, string>());
-  const reasoningRef = useRef(new Map<string, string>());
-  const userMsgsRef = useRef(new Map<string, string[]>()); // optimistic, deduped vs timeline
+  // Locally assembled streaming text, keyed `threadId::itemId`, with the ts of
+  // the last delta so the pane can tell live text from replayed history.
+  const transcriptsRef = useRef(new Map<string, { text: string; ts: number }>());
+  const reasoningRef = useRef(new Map<string, { text: string; ts: number }>());
   const localGraceRef = useRef(new Map<string, number>());
   const lastTimelineRefreshRef = useRef(0);
   const lastStatusRefreshRef = useRef(0);
@@ -296,7 +304,7 @@ export default function App() {
           lastTimelineRefreshRef.current = now;
           try {
             const tl = await getTimeline(info, focusId);
-            setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+            applyTimeline(tl);
             setExecution(tl.execution ?? null);
             setPlanMode(tl.planMode ?? null);
           } catch {
@@ -331,8 +339,8 @@ export default function App() {
       const key = `${e.threadId}::${itemId}`;
       const map = e.type.startsWith("item/reasoning/") ? reasoningRef.current : transcriptsRef.current;
       if (typeof d.delta === "string" && e.type.endsWith("/delta")) {
-        const cur = map.get(key) ?? "";
-        map.set(key, (cur + d.delta).slice(-MAX_TRANSCRIPT_CHARS));
+        const cur = map.get(key)?.text ?? "";
+        map.set(key, { text: (cur + d.delta).slice(-MAX_TRANSCRIPT_CHARS), ts: e.ts });
       }
     }
   }
@@ -376,6 +384,12 @@ export default function App() {
     });
   }
 
+  /** Timeline blocks plus the coverage the live delta layer is filtered by. */
+  function applyTimeline(tl: Timeline) {
+    setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+    setCoverage(timelineCoverage(tl.items));
+  }
+
   function refreshThreadStatuses() {
     void discover()
       .then((i) => listThreads(i, undefined, 200))
@@ -388,6 +402,7 @@ export default function App() {
     setView({ kind: "detail", thread: snapshot });
     setFocus("detail");
     setTimeline([]);
+    setCoverage(timelineCoverage([]));
     setExecution(null);
     setPlanMode(null);
     setComposer(EMPTY);
@@ -399,7 +414,7 @@ export default function App() {
       .catch(() => setCatalog(buildCatalog([])));
     try {
       const tl = await getTimeline(info!, t.id);
-      setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+      applyTimeline(tl);
       setExecution(tl.execution ?? null);
       setPlanMode(tl.planMode ?? null);
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
@@ -426,10 +441,11 @@ export default function App() {
   }
 
   function appendUserMsg(threadId: string, text: string) {
-    const list = userMsgsRef.current.get(threadId) ?? [];
-    if (list[list.length - 1] !== text) {
-      userMsgsRef.current.set(threadId, [...list.slice(-60), text]);
-    }
+    setUserMsgs((prev) => {
+      const list = prev.get(threadId) ?? [];
+      if (list[list.length - 1] === text) return prev;
+      return new Map(prev).set(threadId, [...list.slice(-60), text]);
+    });
   }
 
   async function send() {
@@ -653,28 +669,24 @@ export default function App() {
     const prefix = `${view.thread.id}::`;
     // Newlines are load-bearing: they carry the markdown block structure the
     // renderer needs. Only trim the edges.
-    // The server timeline is authoritative. Once a streamed message lands there,
-    // the locally assembled copy is a stale duplicate of the same text (and a
-    // truncated one while the turn is still arriving), so drop it.
-    const settled = timeline.filter((b) => b.role === "agent").map((b) => b.text);
-    const agent: TranscriptBlock[] = [...transcriptsRef.current.entries()]
-      .filter(([k, text]) => k.startsWith(prefix) && text.trim().length > 0)
-      .map(([, text]) => text.trim())
-      .filter((text) => !settled.some((s) => s.includes(text)))
-      .map((text) => ({ role: "agent" as const, text }));
-    if (!hideReasoning) {
-      for (const [k, text] of reasoningRef.current.entries()) {
-        if (k.startsWith(prefix) && text.trim().length > 0) {
-          agent.push({ role: "reasoning", text: text.trim() });
-        }
-      }
-    }
+    // The server timeline is authoritative; live text is only what it has not
+    // accounted for. An item the timeline already carries is a duplicate, and
+    // one that predates its newest row is history the timeline page windowed
+    // out — replaying either appends the conversation a second time, out of
+    // order, below the timeline.
+    const live = (map: Map<string, { text: string; ts: number }>, role: "agent" | "reasoning") =>
+      [...map.entries()]
+        .filter(([k]) => k.startsWith(prefix))
+        .filter(([k, v]) => v.text.trim().length > 0 && !coveredByTimeline(coverage, k.slice(prefix.length), v.ts))
+        .map(([, v]) => ({ role, text: v.text.trim() }));
+    const agent: TranscriptBlock[] = live(transcriptsRef.current, "agent");
+    if (!hideReasoning) agent.push(...live(reasoningRef.current, "reasoning"));
     const sent = new Set(timeline.filter((b) => b.role === "user").map((b) => b.text));
-    const users: TranscriptBlock[] = (userMsgsRef.current.get(view.thread.id) ?? [])
+    const users: TranscriptBlock[] = (userMsgs.get(view.thread.id) ?? [])
       .filter((text) => !sent.has(text))
       .map((text) => ({ role: "user" as const, text }));
     return { blocks: [...timeline, ...users, ...agent], live: focusedEvents.length };
-  }, [timeline, focusedEvents, hideReasoning, view]);
+  }, [timeline, coverage, userMsgs, focusedEvents, hideReasoning, view]);
 
   // Navigator rows: threads grouped under their project. A flat list of every
   // thread on the host is unnavigable past ~20 rows; the project is the unit

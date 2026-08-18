@@ -40,6 +40,33 @@ export type CatalogEntry = {
   description: string;
 };
 
+export const MENU_MAX_ENTRIES = 6;
+
+export type MenuSelection = {
+  selected: number;
+  firstVisible: number;
+};
+
+export const INITIAL_MENU_SELECTION: MenuSelection = { selected: 0, firstVisible: 0 };
+
+/** Move selection while keeping a stable viewport until the selected row
+ * crosses one of its edges. */
+export function moveMenuSelection(
+  state: MenuSelection,
+  delta: number,
+  entryCount: number,
+  visibleCount = MENU_MAX_ENTRIES,
+): MenuSelection {
+  const last = Math.max(0, entryCount - 1);
+  const selected = Math.max(0, Math.min(last, state.selected + delta));
+  const size = Math.max(1, visibleCount);
+  const maxFirst = Math.max(0, entryCount - size);
+  let firstVisible = Math.max(0, Math.min(maxFirst, state.firstVisible));
+  if (selected < firstVisible) firstVisible = selected;
+  else if (selected >= firstVisible + size) firstVisible = selected - size + 1;
+  return { selected, firstVisible };
+}
+
 const COMMAND_ENTRIES: CatalogEntry[] = [
   { kind: "command", name: "compact", description: "Compact context" },
   { kind: "command", name: "cancel-plan", description: "Exit plan mode" },

@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import type { Execution, ThreadRow } from "./api.js";
 import type { MdLine } from "./markdown.js";
 import type { ComposerLayout } from "./composer.js";
-import type { CatalogEntry } from "./commands.js";
+import { MENU_MAX_ENTRIES, type CatalogEntry } from "./commands.js";
 
 export type PaneFocus = "list" | "detail";
 
@@ -56,6 +56,7 @@ export type ThreadListPaneProps = {
   hostNames: Map<string, string>;
   width: number;
   height: number;
+  focused?: boolean;
 };
 
 // A branch every thread shares distinguishes nothing; it just repeats down the
@@ -84,7 +85,15 @@ export function ThreadListPane(props: ThreadListPaneProps) {
   const remaining = props.rows.length - (props.firstVisible + props.visibleCount);
 
   return (
-    <Box flexDirection="column" width={props.width} height={props.height} borderStyle="round" overflow="hidden">
+    <Box
+      flexDirection="column"
+      width={props.width}
+      height={props.height}
+      borderStyle="round"
+      borderColor={props.focused ? "cyan" : "gray"}
+      borderDimColor={!props.focused}
+      overflow="hidden"
+    >
       {props.rows.length === 0 && <Text dimColor>no threads</Text>}
       {visibleRows.map((row, index) => {
         const selected = props.firstVisible + index === props.selectedIndex;
@@ -139,7 +148,7 @@ export type ThreadPaneProps = {
   scrollUp: number;
   composer: ComposerLayout;
   /** Slash completion, when the token at the cursor matches something. */
-  menu?: { entries: CatalogEntry[]; selected: number };
+  menu?: { entries: CatalogEntry[]; selected: number; firstVisible: number };
   focus: PaneFocus;
   /** Seconds the current turn has been running, when one is. */
   elapsedSeconds: number | null;
@@ -186,27 +195,29 @@ export function contextRow(props: ThreadPaneProps): string[] {
 
 /** Rows the slash menu occupies, including its section headers. Capped so it
  * can never crowd the transcript out entirely. */
-export const MENU_MAX_ENTRIES = 6;
-
 export function menuHeight(menu: ThreadPaneProps["menu"]): number {
   if (!menu || menu.entries.length === 0) return 0;
-  const shown = Math.min(menu.entries.length, MENU_MAX_ENTRIES);
-  const sections = new Set(menu.entries.slice(0, shown).map((e) => e.kind)).size;
-  return shown + sections;
+  const shown = menu.entries.slice(menu.firstVisible, menu.firstVisible + MENU_MAX_ENTRIES);
+  const sections = new Set(shown.map((entry) => entry.kind)).size;
+  return shown.length + sections + 2;
 }
 
 /** Slash completion, sectioned like the app: commands, then skills. */
 function SlashMenu(props: { menu: NonNullable<ThreadPaneProps["menu"]>; width: number }) {
-  const shown = props.menu.entries.slice(0, MENU_MAX_ENTRIES);
-  const nameWidth = Math.max(12, Math.floor(props.width * 0.4));
-  const descWidth = Math.max(0, props.width - nameWidth - 5);
+  const shown = props.menu.entries.slice(
+    props.menu.firstVisible,
+    props.menu.firstVisible + MENU_MAX_ENTRIES,
+  );
+  const innerWidth = Math.max(1, props.width - 2);
+  const nameWidth = Math.max(12, Math.floor(innerWidth * 0.4));
+  const descWidth = Math.max(0, innerWidth - nameWidth - 5);
   let section: string | null = null;
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={props.width} borderStyle="single" borderColor="cyan">
       {shown.map((entry, index) => {
         const header = entry.kind !== section ? (section = entry.kind) : null;
-        const selected = index === props.menu.selected;
+        const selected = props.menu.firstVisible + index === props.menu.selected;
         return (
           <Box flexDirection="column" key={`${entry.kind}:${entry.name}`}>
             {header && <Text dimColor>{header === "command" ? "Commands" : "Skills"}</Text>}
@@ -245,6 +256,7 @@ export function ThreadPane(props: ThreadPaneProps) {
   // The pane has fixed geometry, so the menu takes its rows from the transcript
   // rather than overlaying it.
   const menuRows = menuHeight(props.menu);
+  const menuActive = menuRows > 0;
   const planRows = props.planMode ? 1 : 0;
   const visibleCount = Math.max(3, props.height - 10 - menuRows - planRows);
   const scrollable = Math.max(0, props.detailLines.length - visibleCount);
@@ -255,7 +267,15 @@ export function ThreadPane(props: ThreadPaneProps) {
   const empty = composer.rows.length === 1 && composer.rows[0] === "";
 
   return (
-    <Box flexDirection="column" width={props.width} height={props.height} borderStyle="round" overflow="hidden">
+    <Box
+      flexDirection="column"
+      width={props.width}
+      height={props.height}
+      borderStyle="round"
+      borderColor="gray"
+      borderDimColor
+      overflow="hidden"
+    >
       {/* Title only — the context line below the transcript carries the rest. */}
       <Text wrap="truncate">
         <Text color="cyan" bold>
@@ -265,24 +285,30 @@ export function ThreadPane(props: ThreadPaneProps) {
       </Text>
       <Box flexDirection="column" height={visibleCount} overflow="hidden">
         {visible.length === 0 && <Text dimColor>{active ? "streaming…" : "no messages"}</Text>}
-        {visible.map((line, index) => (
-          <Text key={from + index} wrap="truncate">
-            {/* A blank block separator still has to occupy a row. */}
-            {line.spans.length === 0
-              ? " "
-              : line.spans.map((span, spanIndex) => (
-                  <Text
-                    key={spanIndex}
-                    bold={span.bold}
-                    italic={span.italic}
-                    dimColor={span.dim}
-                    color={span.color}
-                  >
-                    {span.text}
-                  </Text>
-                ))}
-          </Text>
-        ))}
+        {visible.map((line, index) =>
+          line.spans.every((span) => span.text.trim() === "") ? (
+            // A blank MdLine may contain only zero-width padding spans; Ink
+            // gives the resulting Text zero height. The Box consumes the row
+            // already budgeted for the separator in visibleCount.
+            <Box key={from + index} minHeight={1} flexShrink={0}>
+              <Text> </Text>
+            </Box>
+          ) : (
+            <Text key={from + index} wrap="truncate">
+              {line.spans.map((span, spanIndex) => (
+                <Text
+                  key={spanIndex}
+                  bold={span.bold}
+                  italic={span.italic}
+                  dimColor={span.dim}
+                  color={span.color}
+                >
+                  {span.text}
+                </Text>
+              ))}
+            </Text>
+          ),
+        )}
       </Box>
       {/* Context, not counters: where this thread runs and what it is doing. */}
       <Text dimColor wrap="truncate">
@@ -302,10 +328,11 @@ export function ThreadPane(props: ThreadPaneProps) {
         flexDirection="column"
         height={6}
         borderStyle="single"
-        borderColor={props.focus === "detail" ? "cyan" : "gray"}
+        borderColor={props.focus === "detail" && !menuActive ? "cyan" : "gray"}
+        borderDimColor={props.focus !== "detail" || menuActive}
         paddingX={1}
       >
-        <Text color={props.focus === "detail" ? "cyan" : "gray"}>
+        <Text color={props.focus === "detail" && !menuActive ? "cyan" : "gray"}>
           MESSAGE
           {composer.scrolled ? <Text dimColor> ▲</Text> : ""}
         </Text>
@@ -355,7 +382,12 @@ export function WorkspaceLayout(props: WorkspaceLayoutProps) {
       <Text wrap="truncate">{props.topBar}</Text>
       <Box flexDirection="row" height={paneHeight}>
         {showList && (
-          <ThreadListPane {...props.list} width={layout.listWidth} height={paneHeight} />
+          <ThreadListPane
+            {...props.list}
+            width={layout.listWidth}
+            height={paneHeight}
+            focused={props.focus === "list"}
+          />
         )}
         {!layout.compact && <Box width={1} />}
         {showDetail && props.detail ? (

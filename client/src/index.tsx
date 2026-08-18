@@ -8,6 +8,7 @@ import { Box, Text, useApp, useInput, useStdout, render } from "ink";
 import {
   cancelPlan,
   compactThread,
+  coveredByTimeline,
   discover,
   eventActivityLabel,
   eventsSince,
@@ -25,14 +26,18 @@ import {
   tellThread,
   threadShow,
   timelineBlocks,
+  timelineCoverage,
   type BufferedEvent,
   type ClientInfo,
   type EventsPage,
   type Execution,
   type Project,
   type ThreadRow,
+  type Timeline,
+  type TimelineCoverage,
+  type TimelineCursor,
 } from "./api.js";
-import { calculatePaneLayout, WorkspaceLayout, type ListRow } from "./layout.js";
+import { calculatePaneLayout, menuHeight, transcriptRows, WorkspaceLayout, type ListRow } from "./layout.js";
 import { renderBlocks, type TranscriptBlock } from "./markdown.js";
 import {
   applyKey,
@@ -65,6 +70,9 @@ const MAX_TAIL = 600;
 const MAX_TRANSCRIPT_CHARS = 20_000;
 const MAX_INPUT_ROWS = 3;
 const MAX_TRANSCRIPT_BLOCKS = 200;
+// Scroll-back ceiling. Every loaded block is re-wrapped whenever the pane width
+// changes, so history is capped rather than unbounded.
+const MAX_HISTORY_BLOCKS = 600;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
 
@@ -132,6 +140,15 @@ export default function App() {
   const [focus, setFocus] = useState<"list" | "detail">("list");
   const [tail, setTail] = useState<BufferedEvent[]>([]);
   const [timeline, setTimeline] = useState<TranscriptBlock[]>([]);
+  // History paged in above the live page. Immutable once loaded: the 4s refresh
+  // replaces `timeline` wholesale, which would otherwise throw scroll-back away
+  // every tick.
+  const [older, setOlder] = useState<TranscriptBlock[]>([]);
+  const [olderCursor, setOlderCursor] = useState<TimelineCursor | null>(null);
+  const [coverage, setCoverage] = useState(() => timelineCoverage([]));
+  // Optimistic user messages, deduped against the timeline. State, not a ref:
+  // the transcript has to repaint the moment one is appended.
+  const [userMsgs, setUserMsgs] = useState<Map<string, string[]>>(new Map());
   const [execution, setExecution] = useState<Execution | null>(null);
   const [planMode, setPlanMode] = useState<{ prompt: string } | null>(null);
   const [composer, setComposer] = useState<Composer>(EMPTY);
@@ -155,10 +172,13 @@ export default function App() {
   const threadCursorRef = useRef(new Map<string, number>());
   const seenSeqRef = useRef(new Set<number>());
   const tailRef = useRef<BufferedEvent[]>([]);
-  const transcriptsRef = useRef(new Map<string, string>());
-  const reasoningRef = useRef(new Map<string, string>());
-  const userMsgsRef = useRef(new Map<string, string[]>()); // optimistic, deduped vs timeline
+  // Locally assembled streaming text, keyed `threadId::itemId`, with the ts of
+  // the last delta so the pane can tell live text from replayed history.
+  const transcriptsRef = useRef(new Map<string, { text: string; ts: number }>());
+  const reasoningRef = useRef(new Map<string, { text: string; ts: number }>());
   const localGraceRef = useRef(new Map<string, number>());
+  const pagingRef = useRef(false);
+  const pagingStartedRef = useRef(false);
   const lastTimelineRefreshRef = useRef(0);
   const lastStatusRefreshRef = useRef(0);
   const pollMsRef = useRef(800);
@@ -275,7 +295,10 @@ export default function App() {
           const next = [...tailRef.current, ...fresh].slice(-MAX_TAIL);
           tailRef.current = next;
           setTail(next);
-          assembleTranscripts(fresh);
+          // Only the focused thread: the map is read with that thread's prefix
+          // and nothing else, so text for background threads is unreachable
+          // growth. List markers read `tail`, not this.
+          if (focusId) assembleTranscripts(fresh.filter((e) => e.threadId === focusId));
           // Turn clock for the open thread: how long has it been working.
           for (const e of fresh) {
             if (focusId && e.threadId !== focusId) continue;
@@ -296,7 +319,7 @@ export default function App() {
           lastTimelineRefreshRef.current = now;
           try {
             const tl = await getTimeline(info, focusId);
-            setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+            applyTimeline(focusId, tl);
             setExecution(tl.execution ?? null);
             setPlanMode(tl.planMode ?? null);
           } catch {
@@ -331,8 +354,8 @@ export default function App() {
       const key = `${e.threadId}::${itemId}`;
       const map = e.type.startsWith("item/reasoning/") ? reasoningRef.current : transcriptsRef.current;
       if (typeof d.delta === "string" && e.type.endsWith("/delta")) {
-        const cur = map.get(key) ?? "";
-        map.set(key, (cur + d.delta).slice(-MAX_TRANSCRIPT_CHARS));
+        const cur = map.get(key)?.text ?? "";
+        map.set(key, { text: (cur + d.delta).slice(-MAX_TRANSCRIPT_CHARS), ts: e.ts });
       }
     }
   }
@@ -376,6 +399,49 @@ export default function App() {
     });
   }
 
+  /** Timeline blocks plus the coverage the live delta layer is filtered by. */
+  function applyTimeline(threadId: string, tl: Timeline) {
+    const cov = timelineCoverage(tl.items);
+    setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+    setCoverage(cov);
+    pruneTranscripts(threadId, cov);
+    // Only while nothing is paged in: once scroll-back starts, the head page's
+    // cursor would walk back over history that is already on screen.
+    setOlderCursor((prev: TimelineCursor | null) => (pagingStartedRef.current ? prev : (tl.page?.hasOlderRows ? (tl.page.olderCursor ?? null) : null)));
+  }
+
+  /** Pull the page of rows just above what is loaded. Scroll position is
+   * measured from the bottom, so prepending never moves the viewport. */
+  async function loadOlder(threadId: string) {
+    if (!info || pagingRef.current || !olderCursor) return;
+    pagingRef.current = true;
+    pagingStartedRef.current = true;
+    try {
+      const tl = await getTimeline(info, threadId, olderCursor);
+      const blocks = tl.items.flatMap((i) => timelineBlocks(i));
+      setOlder((prev) => [...blocks, ...prev].slice(-MAX_HISTORY_BLOCKS));
+      setOlderCursor(tl.page?.hasOlderRows ? (tl.page.olderCursor ?? null) : null);
+      setStatus(blocks.length > 0 ? `loaded ${blocks.length} older rows` : "at the start of the thread");
+    } catch (err) {
+      setStatus(`history error: ${String(err)}`);
+    } finally {
+      pagingRef.current = false;
+    }
+  }
+
+  /** Coverage only ever moves forward, so an entry it accounts for can never be
+   * rendered again. Dropping exactly the set the transcript filter rejects is
+   * safe by construction and keeps the map at roughly one turn's worth. */
+  function pruneTranscripts(threadId: string, cov: TimelineCoverage) {
+    const prefix = `${threadId}::`;
+    for (const map of [transcriptsRef.current, reasoningRef.current]) {
+      for (const [k, v] of map) {
+        if (!k.startsWith(prefix)) continue;
+        if (coveredByTimeline(cov, k.slice(prefix.length), v.ts)) map.delete(k);
+      }
+    }
+  }
+
   function refreshThreadStatuses() {
     void discover()
       .then((i) => listThreads(i, undefined, 200))
@@ -388,6 +454,14 @@ export default function App() {
     setView({ kind: "detail", thread: snapshot });
     setFocus("detail");
     setTimeline([]);
+    setOlder([]);
+    setOlderCursor(null);
+    pagingRef.current = false;
+    pagingStartedRef.current = false;
+    setCoverage(timelineCoverage([]));
+    // Nothing from the thread we just left is reachable again.
+    transcriptsRef.current.clear();
+    reasoningRef.current.clear();
     setExecution(null);
     setPlanMode(null);
     setComposer(EMPTY);
@@ -399,7 +473,7 @@ export default function App() {
       .catch(() => setCatalog(buildCatalog([])));
     try {
       const tl = await getTimeline(info!, t.id);
-      setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
+      applyTimeline(t.id, tl);
       setExecution(tl.execution ?? null);
       setPlanMode(tl.planMode ?? null);
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
@@ -426,10 +500,11 @@ export default function App() {
   }
 
   function appendUserMsg(threadId: string, text: string) {
-    const list = userMsgsRef.current.get(threadId) ?? [];
-    if (list[list.length - 1] !== text) {
-      userMsgsRef.current.set(threadId, [...list.slice(-60), text]);
-    }
+    setUserMsgs((prev) => {
+      const list = prev.get(threadId) ?? [];
+      if (list[list.length - 1] === text) return prev;
+      return new Map(prev).set(threadId, [...list.slice(-60), text]);
+    });
   }
 
   async function send() {
@@ -653,28 +728,24 @@ export default function App() {
     const prefix = `${view.thread.id}::`;
     // Newlines are load-bearing: they carry the markdown block structure the
     // renderer needs. Only trim the edges.
-    // The server timeline is authoritative. Once a streamed message lands there,
-    // the locally assembled copy is a stale duplicate of the same text (and a
-    // truncated one while the turn is still arriving), so drop it.
-    const settled = timeline.filter((b) => b.role === "agent").map((b) => b.text);
-    const agent: TranscriptBlock[] = [...transcriptsRef.current.entries()]
-      .filter(([k, text]) => k.startsWith(prefix) && text.trim().length > 0)
-      .map(([, text]) => text.trim())
-      .filter((text) => !settled.some((s) => s.includes(text)))
-      .map((text) => ({ role: "agent" as const, text }));
-    if (!hideReasoning) {
-      for (const [k, text] of reasoningRef.current.entries()) {
-        if (k.startsWith(prefix) && text.trim().length > 0) {
-          agent.push({ role: "reasoning", text: text.trim() });
-        }
-      }
-    }
+    // The server timeline is authoritative; live text is only what it has not
+    // accounted for. An item the timeline already carries is a duplicate, and
+    // one that predates its newest row is history the timeline page windowed
+    // out — replaying either appends the conversation a second time, out of
+    // order, below the timeline.
+    const live = (map: Map<string, { text: string; ts: number }>, role: "agent" | "reasoning") =>
+      [...map.entries()]
+        .filter(([k]) => k.startsWith(prefix))
+        .filter(([k, v]) => v.text.trim().length > 0 && !coveredByTimeline(coverage, k.slice(prefix.length), v.ts))
+        .map(([, v]) => ({ role, text: v.text.trim() }));
+    const agent: TranscriptBlock[] = live(transcriptsRef.current, "agent");
+    if (!hideReasoning) agent.push(...live(reasoningRef.current, "reasoning"));
     const sent = new Set(timeline.filter((b) => b.role === "user").map((b) => b.text));
-    const users: TranscriptBlock[] = (userMsgsRef.current.get(view.thread.id) ?? [])
+    const users: TranscriptBlock[] = (userMsgs.get(view.thread.id) ?? [])
       .filter((text) => !sent.has(text))
       .map((text) => ({ role: "user" as const, text }));
     return { blocks: [...timeline, ...users, ...agent], live: focusedEvents.length };
-  }, [timeline, focusedEvents, hideReasoning, view]);
+  }, [timeline, coverage, userMsgs, focusedEvents, hideReasoning, view]);
 
   // Navigator rows: threads grouped under their project. A flat list of every
   // thread on the host is unnavigable past ~20 rows; the project is the unit
@@ -810,10 +881,53 @@ export default function App() {
     [composer, detailInnerW],
   );
 
-  const detailLines = useMemo(
+  // History renders on its own, because it is immutable and the live page is
+  // not: folding them into one call would re-wrap every scrolled-back block on
+  // the 4s refresh that only ever changes the tail.
+  const olderLines = useMemo(
+    () => (view.kind === "detail" ? renderBlocks(older, detailInnerW) : []),
+    [older, detailInnerW, view],
+  );
+  const headLines = useMemo(
     () => (view.kind === "detail" ? renderBlocks(conversation.blocks, detailInnerW) : []),
     [conversation, detailInnerW, view],
   );
+  const detailLines = useMemo(
+    // renderBlocks separates its own blocks; the seam between the two calls is
+    // the one gap neither of them knows about.
+    () =>
+      olderLines.length > 0 && headLines.length > 0
+        ? [...olderLines, { spans: [] }, ...headLines]
+        : [...olderLines, ...headLines],
+    [olderLines, headLines],
+  );
+
+  // The pane's own geometry, computed here from the same two exported helpers
+  // it uses, so the scroll ceiling and the paging trigger agree with what is
+  // actually on screen.
+  const detailMenu = menuOpen ? { entries: menuMatches, ...visibleMenuSelection } : undefined;
+  const detailLineCount = detailLines.length;
+  const visibleTranscriptRows = transcriptRows(
+    Math.max(8, rows - 1) - 2,
+    menuHeight(detailMenu),
+    planMode ? 1 : 0,
+  );
+  const maxScrollUp = Math.max(0, detailLineCount - visibleTranscriptRows);
+
+  // Scrolling past the top used to be free — the pane clamps for display, so
+  // the overshoot was invisible. It stops being invisible once history can
+  // arrive underneath it: the clamp would let go and the view would jump by
+  // however far past the end the counter had run.
+  useEffect(() => {
+    setScrollUp((s) => Math.min(s, maxScrollUp));
+  }, [maxScrollUp]);
+
+  // Page history in as the scroll reaches the top.
+  useEffect(() => {
+    if (view.kind !== "detail" || !olderCursor) return;
+    if (scrollUp < maxScrollUp) return;
+    void loadOlder(view.thread.id);
+  }, [scrollUp, maxScrollUp, olderCursor, view]);
 
   // ---- rendering ----
   if (error) {
@@ -921,7 +1035,7 @@ export default function App() {
               detailLines,
               scrollUp,
               composer: composerLayout,
-              menu: menuOpen ? { entries: menuMatches, ...visibleMenuSelection } : undefined,
+              menu: detailMenu,
               focus,
               elapsedSeconds,
               execution,

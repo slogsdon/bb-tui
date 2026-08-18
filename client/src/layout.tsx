@@ -14,6 +14,14 @@ export type PaneLayout = {
 };
 
 /** Calculate stable pane widths while reserving one terminal column to avoid wrapping. */
+/** Transcript rows the detail pane can show. Exported because the app has to
+ * ask the same question to size its scroll ceiling and decide when to page in
+ * history — two copies of this arithmetic would drift apart the first time the
+ * pane's chrome changes height. */
+export function transcriptRows(height: number, menuRows = 0, planRows = 0): number {
+  return Math.max(3, height - 10 - menuRows - planRows);
+}
+
 export function calculatePaneLayout(columns: number, focus: PaneFocus): PaneLayout {
   const usableColumns = Math.max(1, columns - 1);
 
@@ -258,7 +266,7 @@ export function ThreadPane(props: ThreadPaneProps) {
   const menuRows = menuHeight(props.menu);
   const menuActive = menuRows > 0;
   const planRows = props.planMode ? 1 : 0;
-  const visibleCount = Math.max(3, props.height - 10 - menuRows - planRows);
+  const visibleCount = transcriptRows(props.height, menuRows, planRows);
   const scrollable = Math.max(0, props.detailLines.length - visibleCount);
   const clamped = Math.min(props.scrollUp, scrollable);
   const from = Math.max(0, props.detailLines.length - visibleCount - clamped);

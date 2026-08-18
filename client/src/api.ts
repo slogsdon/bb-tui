@@ -166,16 +166,24 @@ export interface Execution {
   reasoningLevel: string;
 }
 
+/** Cursor for the page of rows immediately older than the one just returned. */
+export interface TimelineCursor {
+  anchorSeq: number;
+  anchorId: string;
+}
+
 export interface Timeline {
   items: unknown[];
+  /** Absent on older plugin builds, which always returned the latest page. */
+  page?: { hasOlderRows: boolean; olderCursor: TimelineCursor | null };
   /** Non-null while the provider is in plan mode. Entering it is the agent's
    * move, not bb's — `bb thread cancel-plan` is the only side bb exposes. */
   planMode?: { prompt: string } | null;
   execution?: Execution | null;
 }
 
-export function getTimeline(info: ClientInfo, threadId: string): Promise<Timeline> {
-  return rpc(info.serverUrl, "getTimeline", { threadId });
+export function getTimeline(info: ClientInfo, threadId: string, before?: TimelineCursor): Promise<Timeline> {
+  return rpc(info.serverUrl, "getTimeline", before ? { threadId, before } : { threadId });
 }
 
 export function eventsSince(info: ClientInfo, afterSeq: number, threadId?: string): Promise<EventsPage> {
@@ -324,6 +332,46 @@ export function eventActivityLabel(e: BufferedEvent): string | null {
     default:
       return null;
   }
+}
+
+/** The provider item id embedded in a timeline row id
+ * (`thr_x:assistant:…|item:pi-assistant-103` -> `pi-assistant-103`). Deltas are
+ * keyed by that bare id, so it is the only reliable join between the two. */
+export function rowItemId(id: unknown): string | null {
+  const m = typeof id === "string" ? /\|item:([^|]+)$/.exec(id) : null;
+  return m ? (m[1] ?? null) : null;
+}
+
+/** What the server timeline already accounts for. The buffered-event layer
+ * retains every delta back to the retention window — far more history than the
+ * timeline page shows — so replaying all of it appends the whole conversation a
+ * second time, out of order, below the timeline. The pane keeps a locally
+ * assembled item only when the timeline neither contains that item nor covers
+ * its point in time. */
+export interface TimelineCoverage {
+  itemIds: Set<string>;
+  newestTs: number;
+}
+
+export function timelineCoverage(items: unknown[]): TimelineCoverage {
+  const itemIds = new Set<string>();
+  let newestTs = 0;
+  for (const it of items) {
+    const r = it as { id?: unknown; createdAt?: unknown } | null;
+    const id = rowItemId(r?.id);
+    if (id) itemIds.add(id);
+    if (typeof r?.createdAt === "number") newestTs = Math.max(newestTs, r.createdAt);
+  }
+  return { itemIds, newestTs };
+}
+
+/** Whether the timeline already accounts for a locally assembled item — it
+ * carries that item, or it covers that item's point in time. The transcript
+ * filter and the prune are the same question asked twice, so they share one
+ * answer: anything covered is never rendered again, and is therefore safe to
+ * drop. Keep them on this function. */
+export function coveredByTimeline(cov: TimelineCoverage, itemId: string, ts: number): boolean {
+  return cov.itemIds.has(itemId) || ts <= cov.newestTs;
 }
 
 /** Flatten a timeline row into role-tagged transcript blocks (recursive).

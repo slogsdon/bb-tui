@@ -42,7 +42,15 @@ import {
   slashTokenAt,
   type Composer,
 } from "./composer.js";
-import { buildCatalog, matchEntries, resolveSlash, type CatalogEntry } from "./commands.js";
+import {
+  INITIAL_MENU_SELECTION,
+  MENU_MAX_ENTRIES,
+  buildCatalog,
+  matchEntries,
+  moveMenuSelection,
+  resolveSlash,
+  type CatalogEntry,
+} from "./commands.js";
 import { enterAlternateScreen } from "./terminal.js";
 
 type View =
@@ -140,7 +148,7 @@ export default function App() {
   const [scrollUp, setScrollUp] = useState(0);
   const [modelHints, setModelHints] = useState<string[]>([]);
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
-  const [menuSel, setMenuSel] = useState(0);
+  const [menuSelection, setMenuSelection] = useState(INITIAL_MENU_SELECTION);
   const [menuDismissed, setMenuDismissed] = useState(false);
 
   const cursorRef = useRef(0);
@@ -584,8 +592,16 @@ export default function App() {
       // With the menu open it owns enter, tab, the arrows and escape. Escape
       // only dismisses it — a second escape leaves the composer.
       if (menuOpen && !key.shift && (key.return || key.tab)) return acceptMenuEntry();
-      if (menuOpen && key.upArrow) return setMenuSel((s) => Math.max(0, s - 1));
-      if (menuOpen && key.downArrow) return setMenuSel((s) => Math.min(menuMatches.length - 1, s + 1));
+      if (menuOpen && key.upArrow) {
+        return setMenuSelection((state) =>
+          moveMenuSelection(state, -1, menuMatches.length, MENU_MAX_ENTRIES),
+        );
+      }
+      if (menuOpen && key.downArrow) {
+        return setMenuSelection((state) =>
+          moveMenuSelection(state, 1, menuMatches.length, MENU_MAX_ENTRIES),
+        );
+      }
       if (menuOpen && key.escape) return setMenuDismissed(true);
 
       if (key.return && key.shift) setComposer((c) => applyKey(c, "\n", {}));
@@ -749,17 +765,26 @@ export default function App() {
     [catalog, slashToken],
   );
   const menuOpen = menuMatches.length > 0 && !menuDismissed;
+  // Catalog contents can change after the token does (skills load
+  // asynchronously). Normalize for render and accept so stale selection state
+  // cannot point past a newly shorter match list for even one frame.
+  const visibleMenuSelection = moveMenuSelection(
+    menuSelection,
+    0,
+    menuMatches.length,
+    MENU_MAX_ENTRIES,
+  );
 
   // Re-arm the menu whenever the token itself changes, so dismissing applies to
   // the token you dismissed and not to the rest of the message.
   const tokenText = slashToken?.text ?? null;
   useEffect(() => {
     setMenuDismissed(false);
-    setMenuSel(0);
+    setMenuSelection(INITIAL_MENU_SELECTION);
   }, [tokenText]);
 
   function acceptMenuEntry() {
-    const entry = menuMatches[menuSel];
+    const entry = menuMatches[visibleMenuSelection.selected];
     if (!slashToken || !entry) return;
     setComposer((c) => {
       const token = slashTokenAt(c);
@@ -896,7 +921,7 @@ export default function App() {
               detailLines,
               scrollUp,
               composer: composerLayout,
-              menu: menuOpen ? { entries: menuMatches, selected: menuSel } : undefined,
+              menu: menuOpen ? { entries: menuMatches, ...visibleMenuSelection } : undefined,
               focus,
               elapsedSeconds,
               execution,

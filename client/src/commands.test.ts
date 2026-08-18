@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BB_COMMAND_NAMES, buildCatalog, matchEntries, resolveSlash } from "./commands.js";
+import {
+  BB_COMMAND_NAMES,
+  INITIAL_MENU_SELECTION,
+  MENU_MAX_ENTRIES,
+  buildCatalog,
+  matchEntries,
+  moveMenuSelection,
+  resolveSlash,
+} from "./commands.js";
 
 test("a message that is exactly a bb command runs it", () => {
   assert.deepEqual(resolveSlash("/compact"), { kind: "command", name: "compact", args: "" });
@@ -86,4 +94,30 @@ test("matching is case-insensitive and prefers prefix matches", () => {
 
 test("a token matching nothing yields nothing, which is what hides the menu", () => {
   assert.deepEqual(matchEntries(buildCatalog(skills), "/nonesuch"), []);
+});
+
+test("menu selection scrolls only when it leaves the six-entry viewport", () => {
+  let state = INITIAL_MENU_SELECTION;
+  for (let index = 0; index < 6; index += 1) {
+    state = moveMenuSelection(state, 1, 10, MENU_MAX_ENTRIES);
+  }
+  assert.deepEqual(state, { selected: 6, firstVisible: 1 });
+
+  state = moveMenuSelection(state, -1, 10, MENU_MAX_ENTRIES);
+  assert.deepEqual(state, { selected: 5, firstVisible: 1 });
+});
+
+test("menu selection clamps its viewport at both list ends", () => {
+  assert.deepEqual(moveMenuSelection({ selected: 0, firstVisible: 0 }, -1, 10, 6), {
+    selected: 0,
+    firstVisible: 0,
+  });
+  assert.deepEqual(moveMenuSelection({ selected: 8, firstVisible: 4 }, 1, 10, 6), {
+    selected: 9,
+    firstVisible: 4,
+  });
+  assert.deepEqual(moveMenuSelection({ selected: 9, firstVisible: 4 }, 0, 2, 6), {
+    selected: 1,
+    firstVisible: 0,
+  });
 });

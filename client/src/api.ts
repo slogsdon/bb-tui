@@ -166,16 +166,24 @@ export interface Execution {
   reasoningLevel: string;
 }
 
+/** Cursor for the page of rows immediately older than the one just returned. */
+export interface TimelineCursor {
+  anchorSeq: number;
+  anchorId: string;
+}
+
 export interface Timeline {
   items: unknown[];
+  /** Absent on older plugin builds, which always returned the latest page. */
+  page?: { hasOlderRows: boolean; olderCursor: TimelineCursor | null };
   /** Non-null while the provider is in plan mode. Entering it is the agent's
    * move, not bb's — `bb thread cancel-plan` is the only side bb exposes. */
   planMode?: { prompt: string } | null;
   execution?: Execution | null;
 }
 
-export function getTimeline(info: ClientInfo, threadId: string): Promise<Timeline> {
-  return rpc(info.serverUrl, "getTimeline", { threadId });
+export function getTimeline(info: ClientInfo, threadId: string, before?: TimelineCursor): Promise<Timeline> {
+  return rpc(info.serverUrl, "getTimeline", before ? { threadId, before } : { threadId });
 }
 
 export function eventsSince(info: ClientInfo, afterSeq: number, threadId?: string): Promise<EventsPage> {

@@ -53,10 +53,26 @@ const rpcContract = defineRpcContract({
     output: z.object({ threads: z.array(z.unknown()) }),
   },
   getTimeline: {
-    input: z.object({ threadId: z.string() }).strict(),
+    // `before` requests the page of rows older than a cursor the previous
+    // response handed back; omitted, the response is the latest page.
+    input: z
+      .object({
+        threadId: z.string(),
+        before: z.object({ anchorSeq: z.number(), anchorId: z.string() }).strict().optional(),
+      })
+      .strict(),
     output: z.object({
       items: z.array(z.unknown()),
       nextTs: z.number().optional(),
+      // The timeline is windowed by an event budget, not by row count, so a
+      // long thread returns a single turn. This is how the client learns there
+      // is more above, and where to ask for it.
+      page: z
+        .object({
+          hasOlderRows: z.boolean(),
+          olderCursor: z.object({ anchorSeq: z.number(), anchorId: z.string() }).nullable(),
+        })
+        .optional(),
       // Plan mode is the provider's state, not a bb setting: bb reports it and
       // can cancel it, but nothing client-side can enter it.
       planMode: z.object({ prompt: z.string() }).nullable().optional(),
@@ -296,16 +312,25 @@ export default async function plugin(bb: BbPluginApi) {
       return { threads: res as unknown[] };
     },
 
-    async getTimeline({ threadId }) {
+    async getTimeline({ threadId, before }) {
       // Both ride the timeline call the client already polls, so plan mode and
-      // the execution options cost no extra round trip.
+      // the execution options cost no extra round trip. A scroll-back page is
+      // pure history: neither applies, so it skips that second call.
       const [res, exec] = await Promise.all([
-        bb.sdk.threads.timeline({ threadId }),
-        bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null),
+        bb.sdk.threads.timeline(
+          before
+            ? { threadId, beforeAnchorSeq: String(before.anchorSeq), beforeAnchorId: before.anchorId }
+            : { threadId },
+        ),
+        before ? null : bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null),
       ]);
       const plan = res.activePromptMode;
       return {
         items: res.rows as unknown[],
+        page: {
+          hasOlderRows: res.timelinePage.hasOlderRows,
+          olderCursor: res.timelinePage.olderCursor,
+        },
         planMode: plan ? { prompt: plan.prompt } : null,
         execution: exec
           ? {

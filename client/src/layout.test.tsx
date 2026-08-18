@@ -12,6 +12,7 @@ import {
   ThreadListPane,
   ThreadPane,
   threadMeta,
+  transcriptRows,
   WorkspaceLayout,
 } from "./layout.js";
 
@@ -503,4 +504,32 @@ test("detail footer keeps its shortcuts visible at 80 columns", () => {
   );
 
   assert.match(frame.split("\n").at(-1) ?? "", /tab list/);
+});
+
+test("transcriptRows matches how many lines the pane actually shows", () => {
+  // The app sizes its scroll ceiling and its history paging off this helper
+  // while the pane windows the transcript with it. If the two ever disagree,
+  // scrolling stops at the wrong line and history pages in early or never.
+  const height = 24;
+  const lines = Array.from({ length: 200 }, (_, i) => ({ spans: [{ text: `line-${i}` }] }));
+  const frame = renderFrame(
+    <ThreadPane
+      thread={sampleThread}
+      projectName="bb-tui"
+      hostNames={new Map()}
+      detailLines={lines}
+      scrollUp={0}
+      composer={emptyComposer}
+      focus="detail"
+      elapsedSeconds={null}
+      width={80}
+      height={height}
+    />,
+  );
+
+  const shown = lines.filter((_, i) => frame.includes(`line-${i}\n`) || frame.includes(`line-${i} `));
+  assert.equal(shown.length, transcriptRows(height));
+  // Bottom-anchored: the newest line is always on screen, the oldest is not.
+  assert.match(frame, /line-199/);
+  assert.doesNotMatch(frame, /line-0\b/);
 });

@@ -35,8 +35,9 @@ import {
   type ThreadRow,
   type Timeline,
   type TimelineCoverage,
+  type TimelineCursor,
 } from "./api.js";
-import { calculatePaneLayout, WorkspaceLayout, type ListRow } from "./layout.js";
+import { calculatePaneLayout, menuHeight, transcriptRows, WorkspaceLayout, type ListRow } from "./layout.js";
 import { renderBlocks, type TranscriptBlock } from "./markdown.js";
 import {
   applyKey,
@@ -69,6 +70,9 @@ const MAX_TAIL = 600;
 const MAX_TRANSCRIPT_CHARS = 20_000;
 const MAX_INPUT_ROWS = 3;
 const MAX_TRANSCRIPT_BLOCKS = 200;
+// Scroll-back ceiling. Every loaded block is re-wrapped whenever the pane width
+// changes, so history is capped rather than unbounded.
+const MAX_HISTORY_BLOCKS = 600;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
 
@@ -136,6 +140,11 @@ export default function App() {
   const [focus, setFocus] = useState<"list" | "detail">("list");
   const [tail, setTail] = useState<BufferedEvent[]>([]);
   const [timeline, setTimeline] = useState<TranscriptBlock[]>([]);
+  // History paged in above the live page. Immutable once loaded: the 4s refresh
+  // replaces `timeline` wholesale, which would otherwise throw scroll-back away
+  // every tick.
+  const [older, setOlder] = useState<TranscriptBlock[]>([]);
+  const [olderCursor, setOlderCursor] = useState<TimelineCursor | null>(null);
   const [coverage, setCoverage] = useState(() => timelineCoverage([]));
   // Optimistic user messages, deduped against the timeline. State, not a ref:
   // the transcript has to repaint the moment one is appended.
@@ -168,6 +177,8 @@ export default function App() {
   const transcriptsRef = useRef(new Map<string, { text: string; ts: number }>());
   const reasoningRef = useRef(new Map<string, { text: string; ts: number }>());
   const localGraceRef = useRef(new Map<string, number>());
+  const pagingRef = useRef(false);
+  const pagingStartedRef = useRef(false);
   const lastTimelineRefreshRef = useRef(0);
   const lastStatusRefreshRef = useRef(0);
   const pollMsRef = useRef(800);
@@ -394,6 +405,28 @@ export default function App() {
     setTimeline(tl.items.flatMap((i) => timelineBlocks(i)).slice(-MAX_TRANSCRIPT_BLOCKS));
     setCoverage(cov);
     pruneTranscripts(threadId, cov);
+    // Only while nothing is paged in: once scroll-back starts, the head page's
+    // cursor would walk back over history that is already on screen.
+    setOlderCursor((prev: TimelineCursor | null) => (pagingStartedRef.current ? prev : (tl.page?.hasOlderRows ? (tl.page.olderCursor ?? null) : null)));
+  }
+
+  /** Pull the page of rows just above what is loaded. Scroll position is
+   * measured from the bottom, so prepending never moves the viewport. */
+  async function loadOlder(threadId: string) {
+    if (!info || pagingRef.current || !olderCursor) return;
+    pagingRef.current = true;
+    pagingStartedRef.current = true;
+    try {
+      const tl = await getTimeline(info, threadId, olderCursor);
+      const blocks = tl.items.flatMap((i) => timelineBlocks(i));
+      setOlder((prev) => [...blocks, ...prev].slice(-MAX_HISTORY_BLOCKS));
+      setOlderCursor(tl.page?.hasOlderRows ? (tl.page.olderCursor ?? null) : null);
+      setStatus(blocks.length > 0 ? `loaded ${blocks.length} older rows` : "at the start of the thread");
+    } catch (err) {
+      setStatus(`history error: ${String(err)}`);
+    } finally {
+      pagingRef.current = false;
+    }
   }
 
   /** Coverage only ever moves forward, so an entry it accounts for can never be
@@ -421,6 +454,10 @@ export default function App() {
     setView({ kind: "detail", thread: snapshot });
     setFocus("detail");
     setTimeline([]);
+    setOlder([]);
+    setOlderCursor(null);
+    pagingRef.current = false;
+    pagingStartedRef.current = false;
     setCoverage(timelineCoverage([]));
     // Nothing from the thread we just left is reachable again.
     transcriptsRef.current.clear();
@@ -844,10 +881,53 @@ export default function App() {
     [composer, detailInnerW],
   );
 
-  const detailLines = useMemo(
+  // History renders on its own, because it is immutable and the live page is
+  // not: folding them into one call would re-wrap every scrolled-back block on
+  // the 4s refresh that only ever changes the tail.
+  const olderLines = useMemo(
+    () => (view.kind === "detail" ? renderBlocks(older, detailInnerW) : []),
+    [older, detailInnerW, view],
+  );
+  const headLines = useMemo(
     () => (view.kind === "detail" ? renderBlocks(conversation.blocks, detailInnerW) : []),
     [conversation, detailInnerW, view],
   );
+  const detailLines = useMemo(
+    // renderBlocks separates its own blocks; the seam between the two calls is
+    // the one gap neither of them knows about.
+    () =>
+      olderLines.length > 0 && headLines.length > 0
+        ? [...olderLines, { spans: [] }, ...headLines]
+        : [...olderLines, ...headLines],
+    [olderLines, headLines],
+  );
+
+  // The pane's own geometry, computed here from the same two exported helpers
+  // it uses, so the scroll ceiling and the paging trigger agree with what is
+  // actually on screen.
+  const detailMenu = menuOpen ? { entries: menuMatches, ...visibleMenuSelection } : undefined;
+  const detailLineCount = detailLines.length;
+  const visibleTranscriptRows = transcriptRows(
+    Math.max(8, rows - 1) - 2,
+    menuHeight(detailMenu),
+    planMode ? 1 : 0,
+  );
+  const maxScrollUp = Math.max(0, detailLineCount - visibleTranscriptRows);
+
+  // Scrolling past the top used to be free — the pane clamps for display, so
+  // the overshoot was invisible. It stops being invisible once history can
+  // arrive underneath it: the clamp would let go and the view would jump by
+  // however far past the end the counter had run.
+  useEffect(() => {
+    setScrollUp((s) => Math.min(s, maxScrollUp));
+  }, [maxScrollUp]);
+
+  // Page history in as the scroll reaches the top.
+  useEffect(() => {
+    if (view.kind !== "detail" || !olderCursor) return;
+    if (scrollUp < maxScrollUp) return;
+    void loadOlder(view.thread.id);
+  }, [scrollUp, maxScrollUp, olderCursor, view]);
 
   // ---- rendering ----
   if (error) {
@@ -955,7 +1035,7 @@ export default function App() {
               detailLines,
               scrollUp,
               composer: composerLayout,
-              menu: menuOpen ? { entries: menuMatches, ...visibleMenuSelection } : undefined,
+              menu: detailMenu,
               focus,
               elapsedSeconds,
               execution,

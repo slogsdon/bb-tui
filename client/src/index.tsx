@@ -456,14 +456,19 @@ export default function App() {
     }
   }
 
-  async function doSpawn(promptText: string, useGo: boolean) {
+  /** `configured` picks the alternate spawn target from plugin settings, when
+   * one is set; otherwise both paths fall through to the project's defaults. */
+  async function doSpawn(promptText: string, configured: boolean) {
     if (!promptText.trim() || !info) return;
     const projectId = spawnProject ?? projectOrder[0];
     if (!projectId) {
       setStatus("no project available");
       return;
     }
-    const target = useGo ? "pi · opencode-go" : "project defaults";
+    const spawn = configured ? (info.spawn ?? null) : null;
+    const target = spawn
+      ? [spawn.provider, spawn.model].filter(Boolean).join(" · ")
+      : "project defaults";
     const text = promptText.trim();
     setComposer(EMPTY);
     setStatus(`spawning thread (${projects.get(projectId) ?? projectId}, ${target})…`);
@@ -471,8 +476,8 @@ export default function App() {
       const result = await spawnThread(
         projectId,
         text,
-        useGo ? "pi" : undefined,
-        useGo ? "opencode-go/deepseek-v4-flash" : undefined,
+        spawn?.provider ?? undefined,
+        spawn?.model ?? undefined,
       );
       const t = await threadShow(result.id);
       localGraceRef.current.set(t.id, Date.now());
@@ -801,9 +806,19 @@ export default function App() {
   }
 
   if (view.kind === "spawn") {
+    // Names the configured spawn target so the two shortcuts are legible; with
+    // nothing configured both spawn the same way and the label says so.
+    const configured = info?.spawn ?? null;
+    // With no spawn target configured the two keys do the same thing, so say so
+    // once rather than printing "spawn defaults · d=defaults".
+    const spawnHint = configured
+      ? `enter=spawn ${[configured.provider, configured.model].filter(Boolean).join("/")} · d=defaults`
+      : "enter/d=spawn defaults";
     return (
       <Box flexDirection="column">
-        <Text color="cyan">New thread — prompt (enter=spawn pi/opencode-go · d=defaults · t=project)</Text>
+        <Text color="cyan">
+          New thread — prompt ({spawnHint} · t=project)
+        </Text>
         <Text dimColor>
           project: {spawnProject ? `${projects.get(spawnProject) ?? spawnProject} (${spawnProject})` : "—"}
         </Text>

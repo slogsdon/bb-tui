@@ -15,6 +15,14 @@ export interface ClientPrefs {
   pollMs: number;
 }
 
+/** Optional spawn target for the alternate new-thread shortcut, configured with
+ * `bb plugin config bb-tui set spawnProvider|spawnModel`. Null, or a null
+ * field, means the project's own default is used. */
+export interface SpawnTarget {
+  provider: string | null;
+  model: string | null;
+}
+
 export interface ClientInfo {
   serverUrl: string;
   dataDir: string;
@@ -22,6 +30,7 @@ export interface ClientInfo {
   pluginVersion: string;
   retentionDays: number;
   prefs: ClientPrefs;
+  spawn?: SpawnTarget | null;
 }
 
 export interface ThreadRow {
@@ -100,6 +109,7 @@ async function discoverFresh(): Promise<ClientInfo> {
       pluginVersion: "?",
       retentionDays: 0,
       prefs: { hideReasoning: true, pollMs: 800 },
+      spawn: null,
     };
   }
   try {
@@ -124,6 +134,7 @@ async function discoverFresh(): Promise<ClientInfo> {
     pluginVersion: "?",
     retentionDays: 0,
     prefs: { hideReasoning: true, pollMs: 800 },
+    spawn: null,
   };
 }
 

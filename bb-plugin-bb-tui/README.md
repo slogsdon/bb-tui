@@ -1,83 +1,86 @@
-# bb-plugin-bb-tui
+# bb-tui server plugin
 
-A BB plugin.
+This directory contains the server-side bb plugin used by the local Ink client.
+`server.ts` provides client discovery, thread and timeline RPC methods, buffered
+thread events, settings, and the `bb tui info` command.
 
-## Manifest
+See the [root contributor guide](../README.md) for complete first-time setup and
+client instructions.
 
-`package.json` is the plugin manifest. Notable fields:
+## Requirements
 
-- `bb.server` — backend entry (required); optional `bb.app` for a frontend.
-- `bb.name` and `bb.description` — required human-facing identity.
-- `bb.branding` — required; declare `icon` as a BB icon name or a
-  plugin-relative compact SVG, or declare `logo.light` (with optional
-  `logo.dark`). Logo assets must be relative `.svg`, `.png`, or
-  `.webp` files.
-- `engines.bb` — supported bb app version range.
-- `engines.bbPluginSdk` — the lowest plugin SDK you need (scaffold:
-  `>=0.4.6`). BB reads this as a floor, not a ceiling: a later
-  SDK in the same major still loads your plugin.
-- `dependencies` — every package your source imports that BB does not provide.
-  `bb plugin build` inlines them into `dist/`, and git installs resolve this
-  list alone, so a build-required package here rather than in
-  `devDependencies` is what keeps your plugin installable. `devDependencies`
-  is for types and tooling only (BB shims React, the portal primitives, and
-  `@get-bb/plugin-sdk` at runtime — never bundle them).
+- Node.js 20 or newer and npm.
+- bb server 0.38 or newer.
+- bb plugin SDK 0.4.6 or newer.
 
-Run `bb plugin build` before publishing git/npm installs. It writes
-`dist/server.js` + `server.meta.json` (and, with `bb.app`, `app.js` /
-`app.css` / `app.meta.json`). Each `*.meta.json` stamps SDK major/version,
-`artifactFormatVersion`, `pluginId`, `pluginVersion`, and
-`builtWith` so managed installs can verify the artifacts.
+The bb and SDK floors are declared in `package.json` under `engines`.
 
-## Install
+## Install from source
 
-From this directory (`bb plugin new` already ran the install; a fresh clone
-needs it):
+Run from this directory:
 
-```
-npm install
-bb plugin install .
+```sh
+npm ci
+bb plugin install . --yes
+bb tui info
 ```
 
-After editing sources, reload:
+The plugin is path-installed. Source edits become active after a reload:
 
+```sh
+bb plugin reload bb-tui
+bb tui info
 ```
+
+## Configuration
+
+Inspect current values and descriptions:
+
+```sh
+bb plugin config bb-tui
+```
+
+Settings used by the client and event buffer:
+
+```sh
+bb plugin config bb-tui set hideReasoning true
+bb plugin config bb-tui set pollMs 800
+bb plugin config bb-tui set retentionDays 7
 bb plugin reload bb-tui
 ```
 
-## Configure
+- `hideReasoning`: whether the client suppresses reasoning deltas.
+- `pollMs`: client polling interval, clamped to 200–10,000 milliseconds.
+- `retentionDays`: buffered-event retention, with a minimum of one day.
 
-```
-bb plugin config bb-tui
-bb plugin config bb-tui set greeting hi
-```
+The plugin also exposes `serverUrl`, `spawnProvider`, and `spawnModel` settings;
+blank values use the local server or project defaults.
 
-## Types & API reference
+## Checks
 
-The plugin API ships as the npm package `@get-bb/plugin-sdk`, pinned to an
-exact version in `devDependencies` (`0.4.6` — the SDK of the BB
-that scaffolded this plugin). After `npm install`, the full surface is on disk
-at:
+Typecheck the server entry:
 
-```
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts      # backend
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk-app.d.ts  # frontend
+```sh
+./node_modules/.bin/tsc --noEmit
 ```
 
-Your editor and `tsc` resolve `@get-bb/plugin-sdk` there through ordinary node
-resolution — no path mapping. These are readable declarations: open them for an
-exact signature.
+Synchronize or validate the SDK types against the running bb server:
 
-The SDK surface grows with every BB release, so the pin has to track the BB you
-actually run:
-
-```
-bb plugin types          # sync this plugin's SDK surface to the running BB
-bb plugin types --check  # CI: fail when it does not match
+```sh
+bb plugin types
+bb plugin types --check
 ```
 
-Ask BB to write plugins for you: the `bb-plugin-authoring` skill documents
-the whole surface with examples.
+`@get-bb/plugin-sdk` is pinned in `devDependencies`. Its backend declarations
+are installed at
+`node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts`.
 
-Confused by the API, or need something the types don't explain? Clone the BB
-repo and read the source: <https://github.com/get-bb/bb>.
+## Release artifact check
+
+```sh
+bb plugin build
+```
+
+This validates and bundles the server plugin into `dist/`. It does not build or
+install a distributable client binary; the client currently runs from source as
+documented in the root README.

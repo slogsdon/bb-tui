@@ -36,7 +36,8 @@ the composer all work; terminals and queue UX do not exist yet.
   that drains thread events into SQLite.
 - **Client** — split layout: threads grouped under their project with fold
   markers and counts, and a thread pane with a streaming transcript, markdown
-  rendering, a slash-command menu, and a bordered composer.
+  rendering, a slash-command menu, tool calls and reasoning as they stream,
+  and a bordered composer.
 - **Not yet** — terminal panes, queue UX, a bundled single-file client.
 
 ## Requirements
@@ -90,7 +91,7 @@ Inspect current values and descriptions with `bb plugin config bb-tui`.
 | `serverUrl` | *(blank)* | URL the client should connect to. Blank means this server's own loopback URL. Set it when the TUI runs where that URL does not resolve — another machine, a container, a tunnel. |
 | `retentionDays` | `7` | How long buffered events are kept. |
 | `pollMs` | `800` | How often the client polls for new events. |
-| `hideReasoning` | `true` | Suppress reasoning deltas in the transcript. |
+| `hideReasoning` | `false` | Suppress reasoning deltas in the transcript. |
 | `spawnProvider` | *(blank)* | Provider for the alternate new-thread shortcut. Blank uses the project's default. |
 | `spawnModel` | *(blank)* | Model for the alternate new-thread shortcut. Blank uses the project's default. |
 

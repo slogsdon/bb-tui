@@ -108,7 +108,7 @@ async function discoverFresh(): Promise<ClientInfo> {
       version: "unknown",
       pluginVersion: "?",
       retentionDays: 0,
-      prefs: { hideReasoning: true, pollMs: 800 },
+      prefs: { hideReasoning: false, pollMs: 800 },
       spawn: null,
     };
   }
@@ -133,7 +133,7 @@ async function discoverFresh(): Promise<ClientInfo> {
     version: rt.version ?? "unknown",
     pluginVersion: "?",
     retentionDays: 0,
-    prefs: { hideReasoning: true, pollMs: 800 },
+    prefs: { hideReasoning: false, pollMs: 800 },
     spawn: null,
   };
 }

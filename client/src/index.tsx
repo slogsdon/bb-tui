@@ -56,6 +56,7 @@ import {
   resolveSlash,
   type CatalogEntry,
 } from "./commands.js";
+import { assembleToolItems, type ToolItem } from "./tools.js";
 import { enterAlternateScreen } from "./terminal.js";
 
 type View =
@@ -154,7 +155,7 @@ export default function App() {
   const [composer, setComposer] = useState<Composer>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting…");
-  const [hideReasoning, setHideReasoning] = useState(true);
+  const [hideReasoning, setHideReasoning] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [hostNames, setHostNames] = useState<Map<string, string>>(new Map());
   const [filter, setFilter] = useState("");
@@ -176,6 +177,9 @@ export default function App() {
   // the last delta so the pane can tell live text from replayed history.
   const transcriptsRef = useRef(new Map<string, { text: string; ts: number }>());
   const reasoningRef = useRef(new Map<string, { text: string; ts: number }>());
+  // Tool calls, keyed the same way. Their own map because they are whole lines,
+  // not assembled deltas.
+  const toolsRef = useRef(new Map<string, ToolItem>());
   const localGraceRef = useRef(new Map<string, number>());
   const pagingRef = useRef(false);
   const pagingStartedRef = useRef(false);
@@ -347,6 +351,7 @@ export default function App() {
   );
 
   function assembleTranscripts(events: BufferedEvent[]) {
+    assembleToolItems(toolsRef.current, events);
     for (const e of events) {
       const d = e.payload?.data ?? {};
       const itemId = d.itemId;
@@ -434,7 +439,9 @@ export default function App() {
    * safe by construction and keeps the map at roughly one turn's worth. */
   function pruneTranscripts(threadId: string, cov: TimelineCoverage) {
     const prefix = `${threadId}::`;
-    for (const map of [transcriptsRef.current, reasoningRef.current]) {
+    for (const map of [transcriptsRef.current, reasoningRef.current, toolsRef.current] as Array<
+      Map<string, { ts: number }>
+    >) {
       for (const [k, v] of map) {
         if (!k.startsWith(prefix)) continue;
         if (coveredByTimeline(cov, k.slice(prefix.length), v.ts)) map.delete(k);
@@ -462,6 +469,7 @@ export default function App() {
     // Nothing from the thread we just left is reachable again.
     transcriptsRef.current.clear();
     reasoningRef.current.clear();
+    toolsRef.current.clear();
     setExecution(null);
     setPlanMode(null);
     setComposer(EMPTY);
@@ -733,13 +741,18 @@ export default function App() {
     // one that predates its newest row is history the timeline page windowed
     // out — replaying either appends the conversation a second time, out of
     // order, below the timeline.
-    const live = (map: Map<string, { text: string; ts: number }>, role: "agent" | "reasoning") =>
+    const live = (map: Map<string, { text: string; ts: number }>, role: TranscriptBlock["role"]) =>
       [...map.entries()]
         .filter(([k]) => k.startsWith(prefix))
         .filter(([k, v]) => v.text.trim().length > 0 && !coveredByTimeline(coverage, k.slice(prefix.length), v.ts))
-        .map(([, v]) => ({ role, text: v.text.trim() }));
-    const agent: TranscriptBlock[] = live(transcriptsRef.current, "agent");
-    if (!hideReasoning) agent.push(...live(reasoningRef.current, "reasoning"));
+        .map(([, v]) => ({ role, text: v.text.trim(), ts: v.ts }));
+    // One list, ordered by when each piece arrived: a tool call after the
+    // sentence that announced it, not in a block of its own at the bottom.
+    const agent: Array<TranscriptBlock & { ts: number }> = [
+      ...live(transcriptsRef.current, "agent"),
+      ...live(toolsRef.current, "work"),
+      ...(hideReasoning ? [] : live(reasoningRef.current, "reasoning")),
+    ].sort((a, b) => a.ts - b.ts);
     const sent = new Set(timeline.filter((b) => b.role === "user").map((b) => b.text));
     const users: TranscriptBlock[] = (userMsgs.get(view.thread.id) ?? [])
       .filter((text) => !sent.has(text))

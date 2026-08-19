@@ -112,7 +112,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   const settings = bb.settings.define({
     retentionDays: { type: "string", label: "Event buffer retention (days)", default: "7" },
-    hideReasoning: { type: "boolean", label: "Suppress reasoning deltas in TUI (default on)", default: true },
+    hideReasoning: { type: "boolean", label: "Suppress reasoning deltas in TUI", default: false },
     pollMs: { type: "string", label: "Client poll interval (ms)", default: "800" },
     // The client reaches bb over loopback by default. Set this when the TUI
     // runs somewhere the server's own loopback URL does not resolve — another
@@ -129,8 +129,6 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const cfg = await settings.get();
   const retentionDays = Math.max(1, Number.parseInt(cfg.retentionDays ?? "7", 10) || 7);
-  const hideReasoning = cfg.hideReasoning ?? true;
-  const pollMs = Math.max(200, Math.min(10_000, Number.parseInt(cfg.pollMs ?? "800", 10) || 800));
 
   const db = bb.storage.database();
   bb.storage.migrate(db, [
@@ -220,13 +218,19 @@ export default async function plugin(bb: BbPluginApi) {
     const advertised = (live.serverUrl ?? "").trim();
     const provider = (live.spawnProvider ?? "").trim();
     const model = (live.spawnModel ?? "").trim();
+    // Same reason as the URL above: a saved preference must reach the next
+    // client start without a reload.
+    const livePrefs = {
+      hideReasoning: live.hideReasoning ?? false,
+      pollMs: Math.max(200, Math.min(10_000, Number.parseInt(live.pollMs ?? "800", 10) || 800)),
+    };
     return {
       serverUrl: advertised === "" ? bb.server.loopbackBaseUrl : advertised,
       dataDir: process.env.BB_DATA_DIR ?? "~/.bb",
       version,
       pluginVersion: PLUGIN_VERSION,
       retentionDays,
-      prefs: { hideReasoning, pollMs },
+      prefs: livePrefs,
       spawn:
         provider === "" && model === ""
           ? null

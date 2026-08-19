@@ -14,7 +14,7 @@
 
 /** Commands bb resolves client-side and that `bb thread tell` cannot express.
  * Everything else — skills, provider commands — is passthrough. */
-export const BB_COMMAND_NAMES = ["compact", "cancel-plan"] as const;
+export const BB_COMMAND_NAMES = ["compact", "cancel-plan", "model"] as const;
 
 export type Resolution =
   | { kind: "command"; name: string; args: string }
@@ -35,7 +35,7 @@ export function resolveSlash(input: string): Resolution {
 }
 
 export type CatalogEntry = {
-  kind: "command" | "skill";
+  kind: "command" | "skill" | "model";
   name: string;
   description: string;
 };
@@ -70,7 +70,29 @@ export function moveMenuSelection(
 const COMMAND_ENTRIES: CatalogEntry[] = [
   { kind: "command", name: "compact", description: "Compact context" },
   { kind: "command", name: "cancel-plan", description: "Exit plan mode" },
+  { kind: "command", name: "model", description: "Switch the model for this thread" },
 ];
+
+const MODEL_INVOCATION = /^\/model(?:\s+([^\s]*))?$/i;
+
+/** The filter typed after `/model`, or null when the composer is not a model
+ * invocation. Returning "" for a bare `/model` is what opens the picker the
+ * moment the command is accepted from the menu. */
+export function modelQuery(text: string): string | null {
+  const m = MODEL_INVOCATION.exec(text);
+  return m ? (m[1] ?? "") : null;
+}
+
+/** Model ids as menu entries, filtered by what has been typed so far. */
+export function modelEntries(
+  models: Array<{ id: string; displayName?: string }>,
+  query: string,
+): CatalogEntry[] {
+  const needle = query.trim().toLowerCase();
+  return models
+    .filter((m) => needle === "" || m.id.toLowerCase().includes(needle))
+    .map((m) => ({ kind: "model" as const, name: m.id, description: m.displayName ?? "" }));
+}
 
 /** Merge bb commands with the skills bb knows about. Users do not care which
  * layer resolves a name, so both share one list. */

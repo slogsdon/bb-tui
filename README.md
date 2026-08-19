@@ -36,8 +36,8 @@ the composer all work; terminals and queue UX do not exist yet.
   that drains thread events into SQLite.
 - **Client** — split layout: threads grouped under their project with fold
   markers and counts, and a thread pane with a streaming transcript, markdown
-  rendering, a slash-command menu, tool calls and reasoning as they stream,
-  and a bordered composer.
+  rendering, a slash-command menu (with a `/model` picker), tool calls and
+  reasoning as they stream, and a bordered composer.
 - **Not yet** — terminal panes, queue UX, a bundled single-file client.
 
 ## Requirements
@@ -143,13 +143,14 @@ actions there are ctrl chords.
 | `ctrl-x` | stop the thread |
 | `ctrl-r` | toggle reasoning deltas |
 | `ctrl-t` | compact |
-| `ctrl-p` | pick a model |
 | `tab`, `esc` | back to the list |
 
 ### Slash menu
 
 Typing a `/` at the start of the input or after a space opens a completion
-menu of bb commands and the skills bb knows about, matching bb.app.
+menu of bb commands and the skills bb knows about, matching bb.app. `/model`
+replaces that list with the models the thread's provider offers; accepting one
+switches the thread's model straight away, with nothing left to send.
 
 | Key | Action |
 |---|---|
@@ -171,10 +172,9 @@ reaches the agent as text and the agent enters plan mode itself. bb exposes the
 other half — `bb thread cancel-plan` — and the timeline reports the state, so
 the TUI shows a banner and offers `/cancel-plan` to leave.
 
-In the composer `q` is an ordinary character — use `esc` then `q` to quit. Two
-actions lose their mnemonic to the terminal rather than to preference: `ctrl-m`
-is Enter, and `ctrl-k` is kill-line, so compact and model take `ctrl-t` and
-`ctrl-p`.
+In the composer `q` is an ordinary character — use `esc` then `q` to quit. One
+action loses its mnemonic to the terminal rather than to preference: `ctrl-m` is
+Enter, so compact takes `ctrl-t`.
 
 ### Anywhere
 

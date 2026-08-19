@@ -6,6 +6,8 @@ import {
   MENU_MAX_ENTRIES,
   buildCatalog,
   matchEntries,
+  modelEntries,
+  modelQuery,
   moveMenuSelection,
   resolveSlash,
 } from "./commands.js";
@@ -120,4 +122,33 @@ test("menu selection clamps its viewport at both list ends", () => {
     selected: 1,
     firstVisible: 0,
   });
+});
+
+test("/model is a bb command, with its argument", () => {
+  assert.deepEqual(resolveSlash("/model claude-opus-5"), {
+    kind: "command",
+    name: "model",
+    args: "claude-opus-5",
+  });
+});
+
+test("modelQuery opens the picker on /model and filters as you type", () => {
+  assert.equal(modelQuery("/model"), "");
+  assert.equal(modelQuery("/model "), "");
+  assert.equal(modelQuery("/model opus"), "opus");
+  assert.equal(modelQuery("/mode"), null);
+  assert.equal(modelQuery("switch /model please"), null);
+  // A second word is a message, not a picker.
+  assert.equal(modelQuery("/model opus now"), null);
+});
+
+test("model entries carry ids with their display names", () => {
+  const models = [
+    { id: "claude-opus-5", displayName: "Opus 5" },
+    { id: "claude-sonnet-5", displayName: "Sonnet 5" },
+  ];
+  assert.deepEqual(modelEntries(models, "opus"), [
+    { kind: "model", name: "claude-opus-5", description: "Opus 5" },
+  ]);
+  assert.equal(modelEntries(models, "").length, 2);
 });

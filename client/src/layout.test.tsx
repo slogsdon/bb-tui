@@ -533,3 +533,35 @@ test("transcriptRows matches how many lines the pane actually shows", () => {
   assert.match(frame, /line-199/);
   assert.doesNotMatch(frame, /line-0\b/);
 });
+
+test("model menu renders its own section, one row per model", () => {
+  const entries = ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"].map((name) => ({
+    kind: "model" as const,
+    name,
+    description: name,
+  }));
+  const frame = renderFrame(
+    <ThreadPane
+      thread={sampleThread}
+      projectName="bb-tui"
+      elapsedSeconds={null}
+      hostNames={new Map()}
+      detailLines={[line("Agent response")]}
+      scrollUp={0}
+      composer={emptyComposer}
+      menu={{ entries, selected: 1, firstVisible: 0 }}
+      focus="detail"
+      width={83}
+      height={36}
+    />,
+  );
+
+  const rows = frame.split("\n");
+  const at = (text: string) => rows.findIndex((row) => row.includes(text));
+  assert.ok(at("Models") >= 0);
+  // Header, then every model, in order, inside the menu border.
+  assert.equal(at("claude-fable-5") - at("Models"), 1);
+  assert.equal(at("claude-opus-5") - at("claude-fable-5"), 1);
+  assert.equal(at("claude-sonnet-5") - at("claude-opus-5"), 1);
+  assert.equal(menuHeight({ entries, selected: 1, firstVisible: 0 }), 6);
+});

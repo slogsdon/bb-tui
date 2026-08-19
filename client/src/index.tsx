@@ -52,6 +52,8 @@ import {
   MENU_MAX_ENTRIES,
   buildCatalog,
   matchEntries,
+  modelEntries,
+  modelQuery,
   moveMenuSelection,
   resolveSlash,
   type CatalogEntry,
@@ -62,8 +64,7 @@ import { enterAlternateScreen } from "./terminal.js";
 type View =
   | { kind: "home" }
   | { kind: "detail"; thread: ThreadRow }
-  | { kind: "spawn" }
-  | { kind: "model"; thread: ThreadRow };
+  | { kind: "spawn" };
 
 const MAX_TAIL = 600;
 // Per-item cap on assembled streaming text. Generous because the pane already
@@ -164,7 +165,7 @@ export default function App() {
   const [clockTick, setClockTick] = useState(0);
   const [repainting, setRepainting] = useState(false);
   const [scrollUp, setScrollUp] = useState(0);
-  const [modelHints, setModelHints] = useState<string[]>([]);
+  const [models, setModels] = useState<Array<{ id: string; displayName?: string }>>([]);
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [menuSelection, setMenuSelection] = useState(INITIAL_MENU_SELECTION);
   const [menuDismissed, setMenuDismissed] = useState(false);
@@ -181,6 +182,7 @@ export default function App() {
   // not assembled deltas.
   const toolsRef = useRef(new Map<string, ToolItem>());
   const localGraceRef = useRef(new Map<string, number>());
+  const modelsProviderRef = useRef<string | null>(null);
   const pagingRef = useRef(false);
   const pagingStartedRef = useRef(false);
   const lastTimelineRefreshRef = useRef(0);
@@ -494,9 +496,12 @@ export default function App() {
 
   /** The bb-side implementation of a slash command. Kept next to the table it
    * serves rather than inside it, so the table stays data. */
-  function runBbCommand(name: string, threadId: string): Promise<unknown> {
+  function runBbCommand(name: string, threadId: string, args: string): Promise<unknown> {
     if (name === "compact") return compactThread(threadId);
     if (name === "cancel-plan") return cancelPlan(threadId);
+    if (name === "model") {
+      return args.trim() ? setThreadModel(threadId, args.trim()) : Promise.reject(new Error("usage: /model <id>"));
+    }
     return Promise.reject(new Error(`no bb implementation for /${name}`));
   }
 
@@ -527,7 +532,7 @@ export default function App() {
     if (resolved.kind === "command") {
       setStatus(`running /${resolved.name}…`);
       try {
-        await runBbCommand(resolved.name, tid);
+        await runBbCommand(resolved.name, tid, resolved.args);
         setStatus(`/${resolved.name} done`);
         refreshThreadStatuses();
       } catch (err) {
@@ -582,31 +587,17 @@ export default function App() {
     }
   }
 
-  async function doModel(model: string) {
-    if (view.kind !== "model" || !model.trim()) return;
-    const t = view.thread;
+  /** Apply a model picked from the `/model` menu. The composer clears, because
+   * the command has already run — there is nothing left to send. */
+  async function applyModel(threadId: string, model: string) {
     setComposer(EMPTY);
+    setStatus(`switching to ${model}…`);
     try {
-      await setThreadModel(t.id, model.trim());
-      setStatus(`model → ${model.trim()}`);
+      await setThreadModel(threadId, model);
+      setExecution((prev) => (prev ? { ...prev, model } : prev));
+      setStatus(`model → ${model}`);
     } catch (err) {
       setStatus(`model error: ${String(err)}`);
-    }
-    setView({ kind: "detail", thread: t });
-    setFocus("detail");
-  }
-
-  async function pickModel(t: ThreadRow) {
-    setView({ kind: "model", thread: t });
-    setComposer(EMPTY);
-    setStatus("loading models…");
-    try {
-      const ms = await providerModels(t.providerId);
-      setModelHints(ms.slice(0, 12).map((m) => m.id));
-      setStatus(`${t.providerId}: enter a model id`);
-    } catch {
-      setModelHints([]);
-      setStatus(`could not list models for ${t.providerId}`);
     }
   }
 
@@ -644,15 +635,6 @@ export default function App() {
         }
       } else if (key.ctrl && data === "d") void doSpawn(composer.text, false);
       else setComposer((c) => applyKey(c, data, key));
-      return;
-    }
-    if (view.kind === "model") {
-      if (key.return) void doModel(composer.text);
-      else if (key.escape || data === "q") {
-        const t = view.thread;
-        setView({ kind: "detail", thread: t });
-        setFocus("detail");
-      } else setComposer((c) => applyKey(c, data, key));
       return;
     }
     if (view.kind === "detail") {
@@ -708,8 +690,6 @@ export default function App() {
       } else if (key.ctrl && data === "t") {
         setStatus("compacting…");
         void compactThread(view.thread.id).then(() => setStatus("compaction requested"));
-      } else if (key.ctrl && data === "p") {
-        void pickModel(view.thread);
       } else setComposer((c) => applyKey(c, data, key));
       return;
     }
@@ -844,9 +824,18 @@ export default function App() {
     () => (focus === "detail" && view.kind === "detail" ? slashTokenAt(composer) : null),
     [composer, focus, view],
   );
+  // `/model …` replaces the command list with the provider's models, so the
+  // picker is the same popover the rest of the slash namespace uses.
+  const modelFilter =
+    focus === "detail" && view.kind === "detail" ? modelQuery(composer.text) : null;
   const menuMatches = useMemo(
-    () => (slashToken ? matchEntries(catalog, slashToken.text) : []),
-    [catalog, slashToken],
+    () =>
+      modelFilter !== null
+        ? modelEntries(models, modelFilter)
+        : slashToken
+          ? matchEntries(catalog, slashToken.text)
+          : [],
+    [catalog, slashToken, modelFilter, models],
   );
   const menuOpen = menuMatches.length > 0 && !menuDismissed;
   // Catalog contents can change after the token does (skills load
@@ -861,15 +850,36 @@ export default function App() {
 
   // Re-arm the menu whenever the token itself changes, so dismissing applies to
   // the token you dismissed and not to the rest of the message.
-  const tokenText = slashToken?.text ?? null;
+  const tokenText = modelFilter !== null ? `model:${modelFilter}` : (slashToken?.text ?? null);
   useEffect(() => {
     setMenuDismissed(false);
     setMenuSelection(INITIAL_MENU_SELECTION);
   }, [tokenText]);
 
+  // Models are a ~300ms subprocess, so they load once per provider, the first
+  // time the picker is asked for.
+  const providerId = view.kind === "detail" ? view.thread.providerId : null;
+  useEffect(() => {
+    if (modelFilter === null || !providerId) return;
+    if (modelsProviderRef.current === providerId) return;
+    modelsProviderRef.current = providerId;
+    void providerModels(providerId)
+      .then(setModels)
+      .catch(() => {
+        modelsProviderRef.current = null;
+        setModels([]);
+        setStatus(`could not list models for ${providerId}`);
+      });
+  }, [modelFilter, providerId]);
+
   function acceptMenuEntry() {
     const entry = menuMatches[visibleMenuSelection.selected];
-    if (!slashToken || !entry) return;
+    if (!entry) return;
+    if (entry.kind === "model") {
+      if (view.kind === "detail") void applyModel(view.thread.id, entry.name);
+      return;
+    }
+    if (!slashToken) return;
     setComposer((c) => {
       const token = slashTokenAt(c);
       return token ? replaceToken(c, token, entry.name) : c;
@@ -980,25 +990,6 @@ export default function App() {
           </Text>
         ))}
         <Text dimColor>enter=spawn d=defaults t=cycle project esc/q=cancel</Text>
-      </Box>
-    );
-  }
-
-  if (view.kind === "model") {
-    return (
-      <Box flexDirection="column">
-        <Text color="cyan">Model for {view.thread.id} (provider {view.thread.providerId}):</Text>
-        {composerLayout.rows.map((l, i) => (
-          <Text key={i} wrap="truncate">
-            {i === composerLayout.rows.length - 1 ? `> ${l}` : `  ${l}`}
-          </Text>
-        ))}
-        {modelHints.map((id) => (
-          <Text key={id} dimColor wrap="truncate">
-            {id}
-          </Text>
-        ))}
-        <Text dimColor>enter=apply esc/q=cancel</Text>
       </Box>
     );
   }

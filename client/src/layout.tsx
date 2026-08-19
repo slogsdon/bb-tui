@@ -228,9 +228,9 @@ function SlashMenu(props: { menu: NonNullable<ThreadPaneProps["menu"]>; width: n
         const selected = props.menu.firstVisible + index === props.menu.selected;
         return (
           <Box flexDirection="column" key={`${entry.kind}:${entry.name}`}>
-            {header && <Text dimColor>{header === "command" ? "Commands" : "Skills"}</Text>}
+            {header && <Text dimColor>{header === "command" ? "Commands" : header === "model" ? "Models" : "Skills"}</Text>}
             <Text wrap="truncate" inverse={selected}>
-              {entry.kind === "command" ? " > " : " ~ "}
+              {entry.kind === "command" ? " > " : entry.kind === "model" ? " ◆ " : " ~ "}
               {entry.name.slice(0, nameWidth).padEnd(nameWidth)}
               <Text dimColor={!selected}> {entry.description.slice(0, descWidth)}</Text>
             </Text>
@@ -429,7 +429,7 @@ export function ShortcutFooter(props: { compact: boolean; detailOpen: boolean; f
       ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · esc home · q quit"
       : props.focus === "list"
         ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · tab composer · esc home · q quit"
-        : "↑/↓ scroll · enter send · ⇧enter/^o newline · ^x stop · ^r ^t ^p · tab list · esc list";
+        : "↑/↓ scroll · enter send · ⇧enter/^o newline · ^x stop · /model · tab list · esc list";
   return (
     <Text dimColor wrap="truncate">
       {shortcuts}

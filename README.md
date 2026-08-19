@@ -37,7 +37,7 @@ the composer all work; terminals and queue UX do not exist yet.
 - **Client** — split layout: threads grouped under their project with fold
   markers and counts, and a thread pane with a streaming transcript, markdown
   rendering, a slash-command menu (with a `/model` picker), tool calls and
-  reasoning as they stream, and a bordered composer.
+  reasoning as they stream, mouse scroll and click, and a bordered composer.
 - **Not yet** — terminal panes, queue UX, a bundled single-file client.
 
 ## Requirements
@@ -175,6 +175,18 @@ the TUI shows a banner and offers `/cancel-plan` to leave.
 In the composer `q` is an ordinary character — use `esc` then `q` to quit. One
 action loses its mnemonic to the terminal rather than to preference: `ctrl-m` is
 Enter, so compact takes `ctrl-t`.
+
+### Mouse
+
+| Action | Effect |
+|---|---|
+| wheel over the list | move the selection |
+| wheel over a thread | scroll the transcript |
+| click a list row | open the thread, or fold the project |
+| click the thread pane | focus the composer |
+
+Mouse reporting means the terminal no longer owns drag-select; hold `shift` (or
+`option` in Terminal.app) to select text as before.
 
 ### Anywhere
 

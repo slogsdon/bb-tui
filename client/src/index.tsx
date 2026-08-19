@@ -4,7 +4,7 @@
 // discovery is cached, status refreshes fire only on status-relevant events,
 // and timeline refreshes are throttled to the open thread.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useInput, useStdout, render } from "ink";
+import { Box, Text, useApp, useInput, useStdin, useStdout, render } from "ink";
 import {
   cancelPlan,
   compactThread,
@@ -37,7 +37,14 @@ import {
   type TimelineCoverage,
   type TimelineCursor,
 } from "./api.js";
-import { calculatePaneLayout, menuHeight, transcriptRows, WorkspaceLayout, type ListRow } from "./layout.js";
+import {
+  calculatePaneLayout,
+  hitTest,
+  menuHeight,
+  transcriptRows,
+  WorkspaceLayout,
+  type ListRow,
+} from "./layout.js";
 import { renderBlocks, type TranscriptBlock } from "./markdown.js";
 import {
   applyKey,
@@ -59,6 +66,7 @@ import {
   type CatalogEntry,
 } from "./commands.js";
 import { assembleToolItems, type ToolItem } from "./tools.js";
+import { enableMouse, isMouseInput, parseMouse, type MouseEvent } from "./mouse.js";
 import { enterAlternateScreen } from "./terminal.js";
 
 type View =
@@ -604,6 +612,8 @@ export default function App() {
   // ---- keyboard ----
   useInput((data, key) => {
     if (key.ctrl && data === "c") return exit();
+    // Mouse reports arrive on the same stream; the listener below owns them.
+    if (isMouseInput(data)) return;
     // Checked before every mode so it works from the composer and filter too.
     if (key.ctrl && data === "l") return repaint();
 
@@ -776,6 +786,54 @@ export default function App() {
   }, [threads, projects, collapsed, filter]);
 
   const selectedRow = listRows[sel];
+  const visibleCount = Math.max(4, rows - 6);
+  // Keep the selection four rows down the pane, but stop scrolling once the end
+  // of the list is on screen. Also what turns a click's y into a row.
+  const firstVisible = Math.max(0, Math.min(sel - 4, listRows.length - visibleCount));
+
+  // ---- mouse ----
+  // The wheel scrolls whatever it is over; a click focuses that pane, and on a
+  // list row opens it. Held in a ref because the listener is attached once and
+  // the handler closes over state that changes every frame.
+  const mouseRef = useRef<(event: MouseEvent) => void>(() => {});
+  mouseRef.current = (event: MouseEvent) => {
+    const target = hitTest(cols, rows, focus, event.x, event.y);
+    if (!target) return;
+    if (event.kind === "wheel") {
+      const up = event.direction === "up";
+      if (target.pane === "detail") {
+        if (view.kind === "detail") setScrollUp((sc) => (up ? sc + 3 : Math.max(0, sc - 3)));
+        return;
+      }
+      setSel((sc) => Math.max(0, Math.min(listRows.length - 1, sc + (up ? -1 : 1))));
+      return;
+    }
+    // Right and middle buttons have no meaning here; ignoring them beats
+    // guessing at one.
+    if (event.button !== 0) return;
+    if (target.pane === "detail") {
+      if (view.kind === "detail") setFocus("detail");
+      return;
+    }
+    const row = listRows[firstVisible + target.row];
+    if (!row) return;
+    setSel(firstVisible + target.row);
+    setFocus("list");
+    if (row.kind === "project") toggleProject(row.projectId);
+    else void openThread(row.thread);
+  };
+
+  // Tracking itself is turned on at entry, next to the alternate screen, so a
+  // crash restores the terminal the same way it restores the screen.
+  const { stdin } = useStdin();
+  useEffect(() => {
+    if (!stdin) return;
+    const onData = (chunk: Buffer | string) => {
+      for (const event of parseMouse(chunk.toString())) mouseRef.current(event);
+    };
+    stdin.on("data", onData);
+    return () => void stdin.off("data", onData);
+  }, [stdin]);
 
   function toggleProject(projectId: string) {
     setCollapsed((prev) => {
@@ -994,11 +1052,6 @@ export default function App() {
     );
   }
 
-  const visibleCount = Math.max(4, rows - 6);
-  // Keep the selection four rows down the pane, but stop scrolling once the end
-  // of the list is on screen.
-  const firstVisible = Math.max(0, Math.min(sel - 4, listRows.length - visibleCount));
-
   return (
     <WorkspaceLayout
       columns={cols}
@@ -1059,10 +1112,16 @@ export default function App() {
 }
 
 // TUI entry: `tsx src/index.tsx`
-const restoreScreen = process.stdout.isTTY ? enterAlternateScreen(process.stdout) : () => {};
-process.once("exit", restoreScreen);
+const tty = process.stdout.isTTY;
+const restoreScreen = tty ? enterAlternateScreen(process.stdout) : () => {};
+const restoreMouse = tty ? enableMouse(process.stdout) : () => {};
+const restore = () => {
+  restoreMouse();
+  restoreScreen();
+};
+process.once("exit", restore);
 const instance = render(<App />);
 void instance.waitUntilExit().finally(() => {
-  restoreScreen();
-  process.off("exit", restoreScreen);
+  restore();
+  process.off("exit", restore);
 });

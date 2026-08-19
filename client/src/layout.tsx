@@ -41,6 +41,32 @@ export function calculatePaneLayout(columns: number, focus: PaneFocus): PaneLayo
   };
 }
 
+export type MouseTarget = { pane: "list"; row: number } | { pane: "detail" } | null;
+
+/** Map 1-based terminal coordinates onto a pane, and onto the list row under
+ * the pointer. Kept beside calculatePaneLayout because it is the same geometry
+ * read backwards — split them and a border change breaks clicking silently.
+ * The returned row is an offset into the visible window, not the row list. */
+export function hitTest(
+  columns: number,
+  rows: number,
+  focus: PaneFocus,
+  x: number,
+  y: number,
+): MouseTarget {
+  const layout = calculatePaneLayout(columns, focus);
+  const paneTop = 2; // the top bar owns row 1
+  const paneBottom = paneTop + Math.max(8, rows - 1) - 2 - 1;
+  if (y < paneTop || y > paneBottom) return null;
+  if (layout.compact) return focus === "list" ? listHit(y, paneTop) : { pane: "detail" };
+  return x <= layout.listWidth ? listHit(y, paneTop) : { pane: "detail" };
+}
+
+function listHit(y: number, paneTop: number): MouseTarget {
+  const row = y - paneTop - 1; // the pane's own border takes the first row
+  return row >= 0 ? { pane: "list", row } : null;
+}
+
 const STATUS_STYLE: Record<string, { glyph: string; color: string }> = {
   active: { glyph: "●", color: "green" },
   starting: { glyph: "◐", color: "yellow" },

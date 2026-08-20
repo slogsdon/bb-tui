@@ -110,4 +110,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-void main();
+// Discovery failures are ordinary conditions with an exact fix in the message
+// (bb not running, plugin not installed) — print them, do not stack-trace them.
+void main().catch((err) => fail(err instanceof Error ? err.message : String(err)));

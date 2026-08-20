@@ -433,7 +433,20 @@ export default async function plugin(bb: BbPluginApi) {
         const info = await getClientInfoData();
         return { exitCode: 0, stdout: `${JSON.stringify(info, null, 2)}\n` };
       }
-      return { exitCode: 2, stderr: `usage: bb tui info\n` };
+      // A plugin CLI command runs in the server and returns captured strings —
+      // it has no terminal to draw on, so `bb tui` cannot BE the TUI. Point at
+      // the client instead, or the one discoverable name is a dead end.
+      if (argv.length === 0) {
+        return {
+          exitCode: 0,
+          stdout:
+            `bb-tui runs as its own binary — this plugin is its server half.\n\n` +
+            `  npx bb-tui           launch the terminal UI\n` +
+            `  npm i -g bb-tui      install it once, then run \`bb-tui\`\n` +
+            `  bb tui info          server facts the client discovers\n`,
+        };
+      }
+      return { exitCode: 2, stderr: `usage: bb tui [info]\n` };
     },
   });
 

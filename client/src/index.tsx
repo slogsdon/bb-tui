@@ -40,6 +40,7 @@ import {
 } from "./api.js";
 import {
   calculatePaneLayout,
+  CursorLine,
   hitTest,
   menuHeight,
   transcriptRows,
@@ -688,7 +689,7 @@ export default function App() {
 
     if (view.kind === "spawn") {
       if (key.return) void doSpawn(composer.text, true);
-      else if (key.escape || data === "q") setView({ kind: "home" });
+      else if (key.escape) setView({ kind: "home" });
       else if (key.ctrl && data === "t") {
         const order = projectOrder;
         if (order.length > 0) {
@@ -1092,22 +1093,30 @@ export default function App() {
     // With no spawn target configured the two keys do the same thing, so say so
     // once rather than printing "spawn defaults · d=defaults".
     const spawnHint = configured
-      ? `enter=spawn ${[configured.provider, configured.model].filter(Boolean).join("/")} · d=defaults`
-      : "enter/d=spawn defaults";
+      ? `enter=spawn ${[configured.provider, configured.model].filter(Boolean).join("/")} · ^d=defaults`
+      : "enter/^d=spawn defaults";
     return (
       <Box flexDirection="column">
         <Text color="cyan">
-          New thread — prompt ({spawnHint} · t=project)
+          New thread — prompt ({spawnHint} · ^t=project)
         </Text>
         <Text dimColor>
           project: {spawnProject ? `${projects.get(spawnProject) ?? spawnProject} (${spawnProject})` : "—"}
         </Text>
-        {composerLayout.rows.map((l, i) => (
-          <Text key={i} wrap="truncate">
-            {i === composerLayout.rows.length - 1 ? `> ${l}` : `  ${l}`}
+        {composerLayout.rows.map((row, index) => (
+          <Text key={index} wrap="truncate">
+            {index === 0 ? "> " : "  "}
+            {index === composerLayout.cursorRow ? (
+              <CursorLine text={row} column={composerLayout.cursorCol} focused />
+            ) : (
+              row
+            )}
+            {/* An empty prompt with no caret and no hint reads as a dead
+                screen; every key here goes into the prompt except the chords. */}
+            {composer.text === "" && <Text dimColor>Type a prompt…</Text>}
           </Text>
         ))}
-        <Text dimColor>enter=spawn d=defaults t=cycle project esc/q=cancel</Text>
+        <Text dimColor>enter=spawn ^d=defaults ^t=cycle project esc=cancel</Text>
       </Box>
     );
   }

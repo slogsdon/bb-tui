@@ -286,7 +286,7 @@ function SlashMenu(props: { menu: NonNullable<ThreadPaneProps["menu"]>; width: n
 
 /** One composer row with the cursor drawn as an inverse cell. Terminals hide the
  * real cursor in the alternate screen, so the block is the only position cue. */
-function CursorLine(props: { text: string; column: number; focused: boolean }) {
+export function CursorLine(props: { text: string; column: number; focused: boolean }) {
   const before = props.text.slice(0, props.column);
   const under = props.text.slice(props.column, props.column + 1) || " ";
   const after = props.text.slice(props.column + 1);

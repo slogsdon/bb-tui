@@ -1,28 +1,22 @@
-# One tag ships both halves. The plugin and the client are versioned in
-# lockstep and published together, so `npm:bb-plugin-bb-tui@X`,
-# `git:…@X`, and `bb-tui@X` on npm always describe the same commit.
-name: release
+# Everything a release needs proven, minus the release itself: publishing is a
+# local step (scripts/release.sh) so npm credentials never live in this repo.
+name: ci
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 jobs:
-  release:
+  check:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # npm provenance
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          registry-url: https://registry.npmjs.org
 
       # bb downloads its plugin build toolchain on first use.
       - uses: actions/cache@v4
@@ -33,17 +27,14 @@ jobs:
       - run: npm --prefix bb-plugin-bb-tui ci
       - run: npm --prefix client ci
 
-      - name: versions agree (with each other, and with the tag)
-        run: scripts/check-versions.sh ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+      - run: scripts/check-versions.sh
 
       - run: npm --prefix bb-plugin-bb-tui run typecheck
       - run: npm --prefix bb-plugin-bb-tui test
       - run: npm --prefix client run typecheck
       - run: npm --prefix client test
 
-      # Build both artifacts on every run, not just on tags: a publish-time-only
-      # build failure is one nobody sees until the release is already tagged.
-      - name: build the plugin artifact
+      - name: build both halves
         run: |
           npm --prefix bb-plugin-bb-tui run build
           test -s bb-plugin-bb-tui/dist/server.js
@@ -54,17 +45,14 @@ jobs:
               throw new Error(`artifact ${m.pluginVersion} != manifest ${p.version}`);
             }
           '
-
-      - name: build the client
-        run: |
           npm --prefix client run build
           test -s client/dist/index.js
           test -s client/dist/cli.js
 
       # `files` in each package.json is what actually ships; dist/ is gitignored,
-      # and npm falls back to .gitignore without an allowlist. Fail loudly here
-      # rather than publishing a plugin with no artifact in it.
-      # `npm pack`/`publish` ignore --prefix and read the cwd's package.json.
+      # and npm falls back to .gitignore without an allowlist. Catch an empty
+      # tarball here rather than on the machine doing the publishing.
+      # `npm pack` ignores --prefix and reads the cwd's package.json.
       - name: the tarballs contain what they claim
         run: |
           (cd bb-plugin-bb-tui && npm pack --dry-run --json) > /tmp/plugin-pack.json
@@ -79,11 +67,3 @@ jobs:
             has("/tmp/plugin-pack.json", ["package.json", "server.ts", "dist/server.js"]);
             has("/tmp/client-pack.json", ["package.json", "dist/index.js", "dist/cli.js"]);
           '
-
-      - name: publish
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          (cd bb-plugin-bb-tui && npm publish --provenance --access public)
-          (cd client && npm publish --provenance --access public)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

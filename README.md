@@ -97,6 +97,11 @@ the version the plugin reports, so a newer client keeps working against an
 older plugin (it just polls instead of long-polling) rather than demanding an
 upgrade.
 
+Releases are cut from a checkout with `scripts/release.sh` — CI proves
+everything a release needs (lockstep versions, tests, both builds, and what
+each tarball would contain) but never publishes, so npm credentials stay off
+GitHub. Run it once to see what would ship, then again with `--publish`.
+
 There is also a headless CLI, useful for scripting and for checking that the
 plugin is reachable before you open the UI:
 

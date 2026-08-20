@@ -84,9 +84,12 @@ const MAX_TRANSCRIPT_BLOCKS = 200;
 // Scroll-back ceiling. Every loaded block is re-wrapped whenever the pane width
 // changes, so history is capped rather than unbounded.
 const MAX_HISTORY_BLOCKS = 600;
-// Braille spinner, one frame per tick.
+// Braille spinner, one frame per tick. One tick per second, in step with the
+// elapsed count beside it: a faster spinner means a whole-frame redraw several
+// times a second, which reads as flicker over a remote connection and buys
+// nothing the second hand does not already say.
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPINNER_MS = 120;
+const SPINNER_MS = 1000;
 const UNANSWERED_SEND_MS = 60_000;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
@@ -379,8 +382,6 @@ export default function App() {
   const waitingSince = turnStartedAt ?? pendingSend;
   useEffect(() => {
     if (waitingSince === null) return;
-    // Fast enough that the spinner reads as motion; the pane redraws are cheap
-    // next to the poll they sit between.
     const t = setInterval(() => setClockTick((n) => n + 1), SPINNER_MS);
     return () => clearInterval(t);
   }, [waitingSince]);

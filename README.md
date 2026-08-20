@@ -32,8 +32,8 @@ Early but usable day to day. Threads, streaming, markdown, slash commands, and
 the composer all work; terminals and queue UX do not exist yet.
 
 - **Plugin** — RPC (`getClientInfo` / `listThreads` / `getTimeline` /
-  `eventsSince`), a `bb tui info` discovery command, and a background service
-  that drains thread events into SQLite.
+  `eventsSince`, the last long-pollable), a `bb tui info` discovery command, and
+  a background service that drains thread events into SQLite a page per commit.
 - **Client** — split layout: threads grouped under their project with fold
   markers and counts, and a thread pane with a streaming transcript, markdown
   rendering (tables included), a slash-command menu (with a `/model` picker),
@@ -92,7 +92,7 @@ Inspect current values and descriptions with `bb plugin config bb-tui`.
 |---|---|---|
 | `serverUrl` | *(blank)* | URL the client should connect to. Blank means this server's own loopback URL. Set it when the TUI runs where that URL does not resolve — another machine, a container, a tunnel. |
 | `retentionDays` | `7` | How long buffered events are kept. |
-| `pollMs` | `800` | How often the client polls for new events. |
+| `pollMs` | `800` | Floor on how often the client asks for new events. Against plugin 0.2.0+ the request is long-polled — the server holds it open and answers when an event lands — so this only paces empty rounds. |
 | `hideReasoning` | `false` | Suppress reasoning deltas in the transcript. |
 | `spawnProvider` | *(blank)* | Provider for the alternate new-thread shortcut. Blank uses the project's default. |
 | `spawnModel` | *(blank)* | Model for the alternate new-thread shortcut. Blank uses the project's default. |

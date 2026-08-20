@@ -18,12 +18,15 @@ import {
   listProjects,
   listSkills,
   listThreads,
+  flushCursorsSync,
   loadCursor,
+  shutdownRequests,
   providerModels,
   saveCursor,
   setThreadModel,
   spawnThread,
   stopThread,
+  supportsLongPoll,
   tellThread,
   threadShow,
   timelineBlocks,
@@ -54,6 +57,7 @@ import {
   layoutComposer,
   replaceToken,
   slashTokenAt,
+  stripEscapes,
   type Composer,
 } from "./composer.js";
 import {
@@ -92,6 +96,14 @@ const MAX_HISTORY_BLOCKS = 600;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_MS = 1000;
 const UNANSWERED_SEND_MS = 60_000;
+// Rows per eventsSince page; a full one means the server had more to give.
+const EVENT_PAGE = 500;
+// How long the plugin may hold an eventsSince call open with nothing to say.
+// Under the server's own 25s ceiling, and the RPC abort is set from it, so the
+// wait ends on an event or on the server's answer — never on the client giving
+// up mid-flight.
+const LONG_POLL_MS = 20_000;
+const TIMELINE_REFRESH_MS = 4000;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
 
@@ -104,7 +116,9 @@ const CLEAR_SCREEN = "\u001B[2J\u001B[3J\u001B[H";
  * mapping across PTY modes. */
 function transformInput(prev: string, data: string): string {
   let s = prev;
-  for (const ch of data) {
+  // Same reason as the composer: Ink leaves every escape sequence after the
+  // first in the chunk, and the filter would otherwise collect "[A" too.
+  for (const ch of stripEscapes(data)) {
     if (ch === "\x7f" || ch === "\x08") s = s.slice(0, -1);
     else if (ch >= " " && ch !== "\x7f") s += ch;
   }
@@ -196,10 +210,17 @@ export default function App() {
   // Thread list folded away for the reading width. Only reachable with a thread
   // open — with none there would be nothing left on screen.
   const [listHidden, setListHidden] = useState(false);
+  // Bumped whenever the streaming-assembly refs below actually change. They are
+  // refs, so React cannot see them; this is what lets the transcript memo depend
+  // on the thing that moved instead of on `tail` as a stand-in for it.
+  const [assembly, setAssembly] = useState(0);
 
   const cursorRef = useRef(0);
   const threadCursorRef = useRef(new Map<string, number>());
   const seenSeqRef = useRef(new Set<number>());
+  // Threads whose per-thread stream has drained everything behind the global
+  // one. Until a thread is in here it gets its own eventsSince call.
+  const caughtUpRef = useRef(new Set<string>());
   const tailRef = useRef<BufferedEvent[]>([]);
   // Locally assembled streaming text, keyed `threadId::itemId`, with the ts of
   // the last delta so the pane can tell live text from replayed history.
@@ -212,7 +233,6 @@ export default function App() {
   const modelsProviderRef = useRef<string | null>(null);
   const pagingRef = useRef(false);
   const pagingStartedRef = useRef(false);
-  const lastTimelineRefreshRef = useRef(0);
   const lastStatusRefreshRef = useRef(0);
   const pollMsRef = useRef(800);
   const viewRef = useRef<View>({ kind: "home" });
@@ -262,11 +282,16 @@ export default function App() {
     (async () => {
       try {
         const info = await discover();
-        setInfo(info);
         pollMsRef.current = info.prefs.pollMs;
         setHideReasoning(info.prefs.hideReasoning);
         setStatus(`bb ${info.version} @ ${info.serverUrl}`);
+        // Before setInfo, not after: setting `info` is what starts the poll
+        // loop, and the loop's first call is immediate. Loading the cursor
+        // afterwards meant that first call went out at seq 0 and replayed the
+        // entire retained buffer, 500 rows a page, then saved the low cursor it
+        // had reached — so the next start replayed from further back still.
         cursorRef.current = await loadCursor(info.serverUrl);
+        setInfo(info);
         const projs = await listProjects();
         const order = projs.map((p) => p.id);
         setProjectOrder(order);
@@ -298,81 +323,167 @@ export default function App() {
     });
   }
 
-  // Poll loop: global stream (list markers) + per-thread stream (open detail).
-  useEffect(() => {
-    const t = setInterval(async () => {
-      if (!info) return;
-      const focusId = viewRef.current.kind === "detail" ? viewRef.current.thread.id : undefined;
-      try {
-        const pages: EventsPage[] = [];
-        const g = await eventsSince(info, cursorRef.current);
-        pages.push(g);
-        cursorRef.current = g.nextCursor;
-        await saveCursor(info.serverUrl, g.nextCursor);
-        if (focusId) {
-          const tc = threadCursorRef.current.get(focusId) ?? (await loadCursor(info.serverUrl, focusId));
-          threadCursorRef.current.set(focusId, tc);
-          const pg = await eventsSince(info, tc, focusId);
-          if (pg.events.length > 0) {
-            threadCursorRef.current.set(focusId, pg.nextCursor);
-            await saveCursor(info.serverUrl, pg.nextCursor, focusId);
-            pages.push(pg);
-          }
+  /** One pass of the event stream: global page, the focused thread's own page
+   * when it still needs one, then fold everything new into state. Returns
+   * whether it brought anything back. */
+  async function pollEvents(info: ClientInfo, longPoll: boolean, signal: AbortSignal): Promise<boolean> {
+    const focusId = viewRef.current.kind === "detail" ? viewRef.current.thread.id : undefined;
+    const pages: EventsPage[] = [];
+    const g = await eventsSince(info, cursorRef.current, undefined, longPoll ? LONG_POLL_MS : undefined, signal);
+    pages.push(g);
+    cursorRef.current = g.nextCursor;
+    saveCursor(info.serverUrl, g.nextCursor);
+
+    if (focusId) {
+      // The global page already carries every thread's events, so a second
+      // call for the open thread is a duplicate of rows we just fetched. It
+      // earns its round trip in exactly two cases: the thread has history
+      // behind the global cursor (first open of the session, resuming a
+      // persisted cursor), and a full global page, which may have been filled
+      // by other threads before reaching this one.
+      const caughtUp = caughtUpRef.current.has(focusId);
+      if (!caughtUp || g.events.length >= EVENT_PAGE) {
+        const tc = threadCursorRef.current.get(focusId) ?? (await loadCursor(info.serverUrl, focusId));
+        const pg = await eventsSince(info, tc, focusId, undefined, signal);
+        threadCursorRef.current.set(focusId, pg.nextCursor);
+        saveCursor(info.serverUrl, pg.nextCursor, focusId);
+        // A short page means nothing is left behind the cursor; from here the
+        // global stream is enough.
+        if (pg.events.length < EVENT_PAGE) caughtUpRef.current.add(focusId);
+        if (pg.events.length > 0) pages.push(pg);
+      } else {
+        // Keep the persisted per-thread cursor moving off the global page, so
+        // skipping the call does not leave a stale cursor to replay from on the
+        // next start. Seqs are globally monotonic, so the last row for this
+        // thread in an ascending page is its newest.
+        for (let i = g.events.length - 1; i >= 0; i--) {
+          const e = g.events[i]!;
+          if (e.threadId !== focusId) continue;
+          threadCursorRef.current.set(focusId, e.seq);
+          saveCursor(info.serverUrl, e.seq, focusId);
+          break;
         }
-        const fresh = pages.flatMap((p) => p.events).filter((e) => !seenSeqRef.current.has(e.seq));
-        if (fresh.length > 0) {
-          for (const e of fresh) seenSeqRef.current.add(e.seq);
-          if (seenSeqRef.current.size > 20_000) {
-            seenSeqRef.current = new Set(fresh.map((e) => e.seq));
-          }
-          const next = [...tailRef.current, ...fresh].slice(-MAX_TAIL);
-          tailRef.current = next;
-          setTail(next);
-          // Only the focused thread: the map is read with that thread's prefix
-          // and nothing else, so text for background threads is unreachable
-          // growth. List markers read `tail`, not this.
-          if (focusId) assembleTranscripts(fresh.filter((e) => e.threadId === focusId));
-          // Turn clock for the open thread: how long has it been working.
-          for (const e of fresh) {
-            if (focusId && e.threadId !== focusId) continue;
-            if (e.type === "turn/started") {
-              setTurnStartedAt(e.ts || Date.now());
-              setSentAt(null);
-            } else if (e.type === "turn/completed") {
-              setTurnStartedAt(null);
-              setSentAt(null);
-            } else if (e.type === "provider/error" || e.type === "system/error") {
-              setThreadError(eventActivityLabel(e) ?? "provider error");
-              setSentAt(null);
-            }
-          }
-          // Status row refreshes only on status-relevant events, throttled.
-          const hasStatus = fresh.some((e) => STATUS_EVENTS.has(e.type));
-          if (hasStatus && Date.now() - lastStatusRefreshRef.current > 2000) {
-            lastStatusRefreshRef.current = Date.now();
-            refreshThreadStatuses();
-          }
-        }
-        // Throttled timeline refresh for the open thread (server-authoritative
-        // user messages and ordering).
-        const now = Date.now();
-        if (focusId && now - lastTimelineRefreshRef.current > 4000) {
-          lastTimelineRefreshRef.current = now;
-          try {
-            const tl = await getTimeline(info, focusId);
-            applyTimeline(focusId, tl);
-            setExecution(tl.execution ?? null);
-            setPlanMode(tl.planMode ?? null);
-          } catch {
-            // non-fatal; next cycle retries
-          }
-        }
-      } catch (err) {
-        setStatus(`buffer poll error: ${String(err)}`);
       }
-    }, pollMsRef.current);
-    return () => clearInterval(t);
+    }
+
+    const fresh = pages.flatMap((p) => p.events).filter((e) => !seenSeqRef.current.has(e.seq));
+    if (fresh.length === 0) return pages.some((p) => p.events.length > 0);
+
+    for (const e of fresh) seenSeqRef.current.add(e.seq);
+    if (seenSeqRef.current.size > 20_000) {
+      seenSeqRef.current = new Set(fresh.map((e) => e.seq));
+    }
+    const next = [...tailRef.current, ...fresh].slice(-MAX_TAIL);
+    tailRef.current = next;
+    setTail(next);
+    // Only the focused thread: the map is read with that thread's prefix
+    // and nothing else, so text for background threads is unreachable
+    // growth. List markers read `tail`, not this.
+    if (focusId && assembleTranscripts(fresh.filter((e) => e.threadId === focusId))) {
+      setAssembly((n) => n + 1);
+    }
+    // Turn clock for the open thread: how long has it been working.
+    for (const e of fresh) {
+      if (focusId && e.threadId !== focusId) continue;
+      if (e.type === "turn/started") {
+        setTurnStartedAt(e.ts || Date.now());
+        setSentAt(null);
+      } else if (e.type === "turn/completed") {
+        setTurnStartedAt(null);
+        setSentAt(null);
+      } else if (e.type === "provider/error" || e.type === "system/error") {
+        setThreadError(eventActivityLabel(e) ?? "provider error");
+        setSentAt(null);
+      }
+    }
+    // Status row refreshes only on status-relevant events, throttled.
+    const hasStatus = fresh.some((e) => STATUS_EVENTS.has(e.type));
+    if (hasStatus && Date.now() - lastStatusRefreshRef.current > 2000) {
+      lastStatusRefreshRef.current = Date.now();
+      refreshThreadStatuses();
+    }
+    return true;
+  }
+
+  // Event stream. Self-scheduling rather than an interval, because a long-polled
+  // request outlives the interval that would have started the next one.
+  useEffect(() => {
+    if (!info) return;
+    const longPoll = supportsLongPoll(info.pluginVersion);
+    const pollMs = pollMsRef.current;
+    let stopped = false;
+    // Cancels the in-flight request on unmount. A long poll parks for its whole
+    // budget and a pending fetch keeps node alive, so without this, quitting
+    // restores the terminal and then leaves the process sitting there for up to
+    // LONG_POLL_MS before the prompt comes back.
+    const inflight = new AbortController();
+
+    void (async () => {
+      while (!stopped) {
+        const startedAt = Date.now();
+        try {
+          await pollEvents(info, longPoll, inflight.signal);
+        } catch (err) {
+          if (!stopped) setStatus(`buffer poll error: ${String(err)}`);
+        }
+        if (stopped) break;
+        // Always floor at the poll interval, long poll or not. Skipping the
+        // floor when a page carried events looks like it should be free — the
+        // next call will just park — but on any server with a live thread every
+        // call returns rows immediately and the loop spins as fast as HTTP
+        // allows. Measured at 23 req/s against ~1.25 for the plain poll.
+        //
+        // The floor costs the long poll nothing. Idle, the call has already
+        // parked for its full budget and `elapsed` clears the floor outright,
+        // so the next park starts at once; the moment an event lands, that park
+        // returns instantly instead of waiting out a tick. That early return is
+        // the entire win, and it is orthogonal to how fast we re-ask.
+        const elapsed = Date.now() - startedAt;
+        if (elapsed < pollMs) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, pollMs - elapsed);
+            // Same reason as the abort above: a pending timer is one more thing
+            // holding the process open after the UI is gone.
+            inflight.signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              resolve();
+            }, { once: true });
+          });
+        }
+      }
+    })();
+
+    return () => {
+      stopped = true;
+      inflight.abort();
+    };
   }, [info]);
+
+  // Timeline refresh for the open thread (server-authoritative user messages and
+  // ordering). Its own clock: sharing the event loop's meant a long poll parked
+  // for 25s would park this too.
+  const openThreadId = view.kind === "detail" ? view.thread.id : null;
+  useEffect(() => {
+    if (!info || !openThreadId) return;
+    let stopped = false;
+    const t = setInterval(() => {
+      void (async () => {
+        try {
+          const tl = await getTimeline(info, openThreadId);
+          if (stopped) return;
+          applyTimeline(openThreadId, tl);
+          setExecution(tl.execution ?? null);
+          setPlanMode(tl.planMode ?? null);
+        } catch {
+          // non-fatal; next cycle retries
+        }
+      })();
+    }, TIMELINE_REFRESH_MS);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+    };
+  }, [info, openThreadId]);
 
   // A running turn needs a second hand, and nothing else re-renders between
   // events. Only ticks while a turn is actually open.
@@ -403,8 +514,11 @@ export default function App() {
     [waitingSince, clockTick],
   );
 
-  function assembleTranscripts(events: BufferedEvent[]) {
-    assembleToolItems(toolsRef.current, events);
+  /** Fold events into the streaming-assembly refs. Returns whether anything
+   * changed, because the refs are invisible to React and the transcript memo
+   * has to be told. */
+  function assembleTranscripts(events: BufferedEvent[]): boolean {
+    let changed = assembleToolItems(toolsRef.current, events) > 0;
     for (const e of events) {
       const d = e.payload?.data ?? {};
       const itemId = d.itemId;
@@ -414,8 +528,10 @@ export default function App() {
       if (typeof d.delta === "string" && e.type.endsWith("/delta")) {
         const cur = map.get(key)?.text ?? "";
         map.set(key, { text: (cur + d.delta).slice(-MAX_TRANSCRIPT_CHARS), ts: e.ts });
+        changed = true;
       }
     }
+    return changed;
   }
 
   // Server list is authoritative for removal; locally spawned rows get a grace
@@ -519,6 +635,11 @@ export default function App() {
     pagingRef.current = false;
     pagingStartedRef.current = false;
     setCoverage(timelineCoverage([]));
+    // Re-arm the per-thread catch-up. While another thread was open, this one's
+    // events only reached `tail`, never the assembly refs cleared just below —
+    // so opening it needs one call from its own cursor to recover the in-flight
+    // item the timeline has not settled yet. Steady state still skips it.
+    caughtUpRef.current.delete(t.id);
     // Nothing from the thread we just left is reachable again.
     transcriptsRef.current.clear();
     reasoningRef.current.clear();
@@ -540,7 +661,7 @@ export default function App() {
       setExecution(tl.execution ?? null);
       setPlanMode(tl.planMode ?? null);
       const evs = tailRef.current.filter((e) => e.threadId === t.id);
-      assembleTranscripts(evs);
+      if (assembleTranscripts(evs)) setAssembly((n) => n + 1);
       setStatus(`${t.providerId} · ${t.status}`);
     } catch (err) {
       setStatus(`timeline error: ${cliMessage(err)}`);
@@ -781,8 +902,8 @@ export default function App() {
     [tail, view],
   );
 
-  const conversation = useMemo(() => {
-    if (view.kind !== "detail") return { blocks: [] as TranscriptBlock[], live: 0 };
+  const conversation = useMemo<TranscriptBlock[]>(() => {
+    if (view.kind !== "detail") return [];
     const prefix = `${view.thread.id}::`;
     // Newlines are load-bearing: they carry the markdown block structure the
     // renderer needs. Only trim the edges.
@@ -807,8 +928,13 @@ export default function App() {
     const users: TranscriptBlock[] = (userMsgs.get(view.thread.id) ?? [])
       .filter((text) => !sent.has(text))
       .map((text) => ({ role: "user" as const, text }));
-    return { blocks: [...timeline, ...users, ...agent], live: focusedEvents.length };
-  }, [timeline, coverage, userMsgs, focusedEvents, hideReasoning, view]);
+    return [...timeline, ...users, ...agent];
+    // `assembly` is the honest dependency: transcriptsRef/reasoningRef/toolsRef
+    // are read here but are refs, so React cannot observe them. This used to
+    // list `focusedEvents` instead and rely on `tail` happening to change
+    // whenever those refs were mutated — true today, and one refactor away from
+    // a silently stale transcript.
+  }, [timeline, coverage, userMsgs, assembly, hideReasoning, view]);
 
   // Navigator rows: threads grouped under their project. A flat list of every
   // thread on the host is unnavigable past ~20 rows; the project is the unit
@@ -1030,7 +1156,7 @@ export default function App() {
     [older, detailInnerW, view],
   );
   const headLines = useMemo(
-    () => (view.kind === "detail" ? renderBlocks(conversation.blocks, detailInnerW) : []),
+    () => (view.kind === "detail" ? renderBlocks(conversation, detailInnerW) : []),
     [conversation, detailInnerW, view],
   );
   const detailLines = useMemo(
@@ -1172,7 +1298,7 @@ export default function App() {
               debug: process.env.BB_TUI_DEBUG
                 ? {
                     timelineLength: timeline.length,
-                    conversationLive: conversation.live,
+                    conversationLive: focusedEvents.length,
                     cursorSeq: cursorRef.current,
                   }
                 : undefined,
@@ -1188,8 +1314,14 @@ const tty = process.stdout.isTTY;
 const restoreScreen = tty ? enterAlternateScreen(process.stdout) : () => {};
 const restoreMouse = tty ? enableMouse(process.stdout) : () => {};
 const restore = () => {
+  // First, so nothing outlives the UI: a pending fetch or a running `bb`
+  // subprocess keeps node alive long after the screen has been handed back.
+  shutdownRequests();
   restoreMouse();
   restoreScreen();
+  // Cursor writes are debounced, so the last few seconds of progress only
+  // reaches disk if something writes it on the way out.
+  flushCursorsSync();
 };
 process.once("exit", restore);
 const instance = render(<App />);

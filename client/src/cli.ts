@@ -3,7 +3,22 @@
 //   bb-tui info                                      discovery facts
 //   bb-tui list [--project <id>]                     thread list (JSON lines)
 //   bb-tui watch --thread <id> [--from <seq>]        follow buffered events
-import { discover, eventText, eventsSince, listThreads, loadCursor, saveCursor, type ClientInfo, type ThreadRow } from "./api.js";
+import {
+  discover,
+  eventText,
+  eventsSince,
+  flushCursorsSync,
+  listThreads,
+  loadCursor,
+  saveCursor,
+  supportsLongPoll,
+  type ClientInfo,
+  type ThreadRow,
+} from "./api.js";
+
+// Cursor writes are debounced, so `watch --once` and a ctrl-c would both exit
+// with the last few seconds of progress still in memory.
+process.once("exit", flushCursorsSync);
 
 function fail(msg: string): never {
   console.error(`error: ${msg}`);
@@ -48,12 +63,15 @@ async function main() {
       let cursor = Number.parseInt(flags.from ?? "", 10);
       cursor = Number.isFinite(cursor) && cursor > 0 ? cursor : await loadCursor(info.serverUrl, flags.thread);
       const skipReasoning = flags["no-reasoning"] === "true";
+      // Same deal as the TUI: let the plugin hold the request open so events
+      // print when they happen rather than on the next 750ms tick.
+      const waitMs = supportsLongPoll(info.pluginVersion) ? 20_000 : undefined;
       let got = 0;
       const started = Date.now();
       for (;;) {
         let page;
         try {
-          page = await eventsSince(info, cursor, flags.thread);
+          page = await eventsSince(info, cursor, flags.thread, waitMs);
         } catch (err) {
           console.error(`poll error at cursor ${cursor}: ${String(err)}`);
           await sleep(2000);
@@ -66,11 +84,14 @@ async function main() {
           got++;
         }
         cursor = page.nextCursor;
-        await saveCursor(info.serverUrl, page.nextCursor, flags.thread);
+        saveCursor(info.serverUrl, page.nextCursor, flags.thread);
         if (got > 0 && flags["once"] === "true") {
           console.log(`total ${got} events in ${Date.now() - started}ms`);
           return;
         }
+        // Floors the cadence whether or not the request was long-polled: on a
+        // busy server a long poll returns rows immediately, and skipping the
+        // sleep then spins.
         await sleep(750);
       }
     }

@@ -1,5 +1,6 @@
 // bb-tui client API layer: discovery + plugin RPC + bb CLI wrappers.
 import { execFile } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,25 @@ import { promisify } from "node:util";
 import type { TranscriptBlock } from "./markdown.js";
 
 const execFileP = promisify(execFile);
+
+// Everything this module has in flight, cancelled together when the UI goes
+// away. Node keeps the process alive for a pending fetch *and* for a running
+// child process, and the bb CLI wrapper below allows 120s — so without a way to
+// cancel them, quitting the TUI restores the terminal and then leaves the
+// process sitting there, which is indistinguishable from a hang.
+const appAbort = new AbortController();
+
+/** Cancel every in-flight request and subprocess. Call once, on the way out. */
+export function shutdownRequests(): void {
+  appAbort.abort();
+}
+
+/** Combine the shutdown signal with a timeout and any caller-supplied signal. */
+function requestSignal(timeoutMs: number, caller?: AbortSignal): AbortSignal {
+  const signals = [AbortSignal.timeout(timeoutMs), appAbort.signal];
+  if (caller) signals.push(caller);
+  return AbortSignal.any(signals);
+}
 
 export type { TranscriptBlock };
 
@@ -113,7 +133,10 @@ async function discoverFresh(): Promise<ClientInfo> {
     };
   }
   try {
-    const { stdout } = await execFileP("bb", ["tui", "info"], { timeout: 10_000 });
+    const { stdout } = await execFileP("bb", ["tui", "info"], {
+      timeout: 10_000,
+      signal: appAbort.signal,
+    });
     const info = JSON.parse(stdout) as ClientInfo;
     if (info.serverUrl) return info;
   } catch {
@@ -138,13 +161,26 @@ async function discoverFresh(): Promise<ClientInfo> {
   };
 }
 
-/** Call a bb-tui plugin RPC method over loopback HTTP. */
-export async function rpc<T>(serverUrl: string, method: string, input: unknown): Promise<T> {
+/** Call a bb-tui plugin RPC method over loopback HTTP. `timeoutMs` has to clear
+ * whatever the server may spend answering — a long-polled eventsSince parks on
+ * purpose, and the default would abort it every time. */
+export async function rpc<T>(
+  serverUrl: string,
+  method: string,
+  input: unknown,
+  timeoutMs = 15_000,
+  signal?: AbortSignal,
+): Promise<T> {
+  // A long-polled request parks on the server for its whole budget, and a
+  // pending fetch keeps node alive — so without a caller-supplied signal to
+  // cancel it, quitting the TUI leaves the process running with the screen
+  // already restored, for up to the full wait. `signal` is how the poll loop
+  // hands over its own cancellation.
   const res = await fetch(`${serverUrl}/api/v1/plugins/bb-tui/rpc/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: input === null ? "null" : JSON.stringify(input),
-    signal: AbortSignal.timeout(15_000),
+    signal: requestSignal(timeoutMs, signal),
   });
   const body = (await res.json()) as { ok: boolean; result?: T; error?: { code?: string; message?: string } };
   if (!body.ok || body.result === undefined) {
@@ -186,8 +222,38 @@ export function getTimeline(info: ClientInfo, threadId: string, before?: Timelin
   return rpc(info.serverUrl, "getTimeline", before ? { threadId, before } : { threadId });
 }
 
-export function eventsSince(info: ClientInfo, afterSeq: number, threadId?: string): Promise<EventsPage> {
-  return rpc(info.serverUrl, "eventsSince", { afterSeq, limit: 500, threadId });
+/** `waitMs` asks the plugin to hold the request open until an event lands, so
+ * text arrives when it is produced rather than up to a poll interval later.
+ * Only send it to a plugin that declares support: the input schema is strict,
+ * so an older build rejects the whole call rather than ignoring the field. */
+export function eventsSince(
+  info: ClientInfo,
+  afterSeq: number,
+  threadId?: string,
+  waitMs?: number,
+  signal?: AbortSignal,
+): Promise<EventsPage> {
+  return rpc(
+    info.serverUrl,
+    "eventsSince",
+    { afterSeq, limit: 500, threadId, ...(waitMs ? { waitMs } : {}) },
+    // The parked wait plus room for the round trip. Aborting at the default
+    // 15s would kill every long poll before the server ever answered.
+    waitMs ? waitMs + 10_000 : undefined,
+    signal,
+  );
+}
+
+/** Whether the connected plugin accepts `eventsSince({ waitMs })`. 0.2.0 is the
+ * first build that does. An unknown version ("?" from the env-override or
+ * runtime.json discovery paths) is treated as too old, which costs a poll
+ * interval of latency and never an error. */
+export function supportsLongPoll(pluginVersion: string | undefined): boolean {
+  const m = /^(\d+)\.(\d+)/.exec(pluginVersion ?? "");
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 0 || minor >= 2;
 }
 
 export interface Project {
@@ -215,6 +281,8 @@ export async function bbJson<T>(command: string[], operands: string[] = []): Pro
   const { stdout } = await execFileP("bb", cliArgs(command, operands), {
     timeout: 120_000,
     maxBuffer: 64 * 1024 * 1024,
+    // A running child keeps node alive for the whole 120s otherwise.
+    signal: appAbort.signal,
   });
   return JSON.parse(stdout) as T;
 }
@@ -439,22 +507,80 @@ function cursorFile(): string {
   return path.join(os.homedir(), ".local", "state", "bb-tui", "cursor.json");
 }
 
+/** How long a cursor may sit unwritten. This used to be a mkdir + read + parse
+ * + write on every save, twice per poll tick, to persist two integers. A cursor
+ * is a resume hint: losing a few seconds of it costs a handful of replayed
+ * events that the timeline-coverage filter already drops. */
+const CURSOR_FLUSH_MS = 5_000;
+
+const dirtyCursors = new Map<string, number>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
 export async function loadCursor(serverUrl: string, threadId?: string): Promise<number> {
+  const k = key(serverUrl, threadId);
+  // An unflushed save is still the truth — reading around it would replay
+  // events the caller has already consumed this session.
+  const pending = dirtyCursors.get(k);
+  if (pending !== undefined) return pending;
   try {
     const raw = JSON.parse(await readFile(cursorFile(), "utf8")) as Record<string, number>;
-    return raw[key(serverUrl, threadId)] ?? 0;
+    return raw[k] ?? 0;
   } catch {
     return 0;
   }
 }
 
-export async function saveCursor(serverUrl: string, seq: number, threadId?: string): Promise<void> {
+export function saveCursor(serverUrl: string, seq: number, threadId?: string): void {
+  dirtyCursors.set(key(serverUrl, threadId), seq);
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flushCursors();
+  }, CURSOR_FLUSH_MS);
+  // The timer must never be the reason the process stays alive.
+  flushTimer.unref?.();
+}
+
+export async function flushCursors(): Promise<void> {
+  if (dirtyCursors.size === 0) return;
+  const batch = [...dirtyCursors];
+  dirtyCursors.clear();
   try {
     const file = cursorFile();
     await mkdir(path.dirname(file), { recursive: true });
     const raw = JSON.parse(await readFile(file, "utf8").catch(() => "{}")) as Record<string, number>;
-    raw[key(serverUrl, threadId)] = seq;
+    // Never let a cursor go backwards. Seqs only ever grow, so a decrease is
+    // always a bug somewhere upstream — and the cost of writing one is that the
+    // next start replays everything between, which is exactly the storm this is
+    // here to make unreachable.
+    for (const [k, seq] of batch) raw[k] = Math.max(raw[k] ?? 0, seq);
     await writeFile(file, JSON.stringify(raw));
+  } catch {
+    // non-fatal
+  }
+}
+
+/** Last-chance flush from a process `exit` handler, where nothing async can
+ * still run. */
+export function flushCursorsSync(): void {
+  if (dirtyCursors.size === 0) return;
+  const batch = [...dirtyCursors];
+  dirtyCursors.clear();
+  try {
+    const file = cursorFile();
+    mkdirSync(path.dirname(file), { recursive: true });
+    let raw: Record<string, number> = {};
+    try {
+      raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, number>;
+    } catch {
+      raw = {};
+    }
+    // Never let a cursor go backwards. Seqs only ever grow, so a decrease is
+    // always a bug somewhere upstream — and the cost of writing one is that the
+    // next start replays everything between, which is exactly the storm this is
+    // here to make unreachable.
+    for (const [k, seq] of batch) raw[k] = Math.max(raw[k] ?? 0, seq);
+    writeFileSync(file, JSON.stringify(raw));
   } catch {
     // non-fatal
   }

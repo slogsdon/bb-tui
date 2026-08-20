@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cliArgs, cliMessage, coveredByTimeline, rowItemId, timelineCoverage } from "./api.js";
+import { cliArgs, cliMessage, coveredByTimeline, rowItemId, supportsLongPoll, timelineCoverage } from "./api.js";
 
 test("rowItemId pulls the delta key out of a timeline row id", () => {
   assert.equal(rowItemId("thr_x:assistant:kind:assistant|turn:t1|parent:root|item:pi-assistant-103"), "pi-assistant-103");
@@ -56,4 +56,16 @@ test("a CLI failure shows its reason, not the command that echoed the message", 
     "error: unknown option '- a'",
   );
   assert.equal(cliMessage("plain string"), "plain string");
+});
+
+test("long polling is offered only to a plugin that declares it", () => {
+  // The plugin's eventsSince input is strict, so sending waitMs to a build that
+  // does not know the field fails the whole call rather than degrading.
+  assert.equal(supportsLongPoll("0.2.0"), true);
+  assert.equal(supportsLongPoll("0.11.3"), true);
+  assert.equal(supportsLongPoll("1.0.0"), true);
+  assert.equal(supportsLongPoll("0.1.0"), false);
+  // Both discovery fallbacks report "?" — no plugin RPC was consulted at all.
+  assert.equal(supportsLongPoll("?"), false);
+  assert.equal(supportsLongPoll(undefined), false);
 });

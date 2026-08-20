@@ -16,6 +16,24 @@ export type KeyFlags = {
   delete?: boolean;
 };
 
+// Escape sequences Ink did not consume. Ink parses the first sequence in a
+// stdin chunk and hands the remainder through as ordinary data, so a held arrow
+// key or a paste delivers several sequences at once and every one after the
+// first lands in the text as a literal "[A". The ESC byte itself is already
+// dropped as a control character; it is the "[A" tail that has to go with it.
+//
+// Built from escapes rather than literal bytes so the source stays plain ASCII,
+// matching markdown.ts. Covers CSI (ESC [ ... final byte) and the
+// two-character escapes.
+const ESCAPE_SEQUENCE = new RegExp("\\u001B\\[[0-9;?]*[ -/]*[@-~]|\\u001B[@-Z\\\\-_]", "g");
+
+/** Drop escape sequences from an input chunk, leaving the text the user
+ * actually typed. A literal "[A" with no ESC in front of it is real input and
+ * survives. */
+export function stripEscapes(data: string): string {
+  return data.replace(ESCAPE_SEQUENCE, "");
+}
+
 const clamp = (n: number, max: number): number => Math.max(0, Math.min(n, max));
 
 const withCursor = (state: Composer, cursor: number): Composer => ({
@@ -80,7 +98,7 @@ export function applyKey(state: Composer, data: string, key: KeyFlags): Composer
 
   let next = state;
   let pending = "";
-  for (const ch of data) {
+  for (const ch of stripEscapes(data)) {
     // Ink reports erase inconsistently across PTY modes: sometimes a flag,
     // sometimes these bytes in the data chunk.
     if (ch === "\u007F" || ch === "\b") {

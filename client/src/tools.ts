@@ -56,8 +56,14 @@ export function toolItemText(item: Item): string | null {
 
 /** Fold tool item events into a map keyed `threadId::itemId`. Keyed, not
  * appended, so `item/completed` replaces the `item/started` line it finishes
- * instead of printing the call twice. */
-export function assembleToolItems(map: Map<string, ToolItem>, events: BufferedEvent[]): void {
+ * instead of printing the call twice.
+ *
+ * Returns how many entries it wrote. The transcript is assembled into refs that
+ * React cannot observe, so the caller needs to know whether anything actually
+ * moved — a size comparison would miss `item/completed` replacing the
+ * `item/started` line in place, which is a visible change. */
+export function assembleToolItems(map: Map<string, ToolItem>, events: BufferedEvent[]): number {
+  let written = 0;
   for (const e of events) {
     if (e.type !== "item/started" && e.type !== "item/completed") continue;
     const item = (e.payload?.data as { item?: Item } | undefined)?.item;
@@ -65,5 +71,7 @@ export function assembleToolItems(map: Map<string, ToolItem>, events: BufferedEv
     const text = toolItemText(item);
     if (text === null) continue;
     map.set(`${e.threadId}::${item.id}`, { text, ts: e.ts });
+    written += 1;
   }
+  return written;
 }

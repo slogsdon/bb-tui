@@ -13,15 +13,31 @@
 // item/reasoning/textDelta) are included, so the TUI gets near-streaming text,
 // not just state.
 //
+// A drained page is one commit, not one per event (see buffer.ts): the plugin
+// runs in-process and better-sqlite3 is synchronous, so every commit here is
+// time the whole bb server is not serving anything else. `eventsSince` can also
+// be long-polled — the drain wakes parked callers as it commits — so the client
+// costs nothing while a thread is quiet and hears about a delta when it lands
+// rather than on its next tick.
+//
 // Learned in Phase-1 spike: bb.sdk.threads.events.wait rejects an empty event
 // type (HTTP 400 "expected string to have >=1 characters") and lists events
 // via a per-thread server seq cursor, so the drain uses events.list instead.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { createEventBuffer, DRAIN_PAGE, MIGRATIONS, PRUNE_INTERVAL_MS } from "./buffer.js";
 
 /** Kept in step with package.json `version` by hand; the manifest is the
- * source of truth for installs, this is only what the client displays. */
-const PLUGIN_VERSION = "0.1.0";
+ * source of truth for installs, this is only what the client displays. The
+ * client also reads it as a capability gate: 0.2.0 is the first build whose
+ * `eventsSince` accepts `waitMs`, and the input schema is strict, so an older
+ * plugin rejects the field outright rather than ignoring it. */
+const PLUGIN_VERSION = "0.2.0";
+
+/** Longest a long-polled `eventsSince` parks before answering empty. Under any
+ * intermediary's idle timeout, and short enough that a wedged connection costs
+ * one stalled interval rather than a stalled session. */
+const MAX_WAIT_MS = 25_000;
 
 const rpcContract = defineRpcContract({
   getClientInfo: {
@@ -90,6 +106,10 @@ const rpcContract = defineRpcContract({
         afterSeq: z.number().int().nonnegative().optional(),
         limit: z.number().int().min(1).max(2000).optional(),
         threadId: z.string().optional(),
+        // Long poll. With no rows past the cursor, hold the request open for up
+        // to this long and answer the moment the drain commits one. Omitted or
+        // zero keeps the original fire-and-return behaviour.
+        waitMs: z.number().int().min(0).max(MAX_WAIT_MS).optional(),
       })
       .strict(),
     output: z.object({
@@ -131,49 +151,28 @@ export default async function plugin(bb: BbPluginApi) {
   const retentionDays = Math.max(1, Number.parseInt(cfg.retentionDays ?? "7", 10) || 7);
 
   const db = bb.storage.database();
-  bb.storage.migrate(db, [
-    `CREATE TABLE IF NOT EXISTS events (
-       seq INTEGER PRIMARY KEY AUTOINCREMENT,
-       thread_id TEXT NOT NULL,
-       type TEXT NOT NULL,
-       payload TEXT NOT NULL,
-       ts INTEGER NOT NULL
-     )`,
-    `CREATE INDEX IF NOT EXISTS idx_events_thread_seq ON events(thread_id, seq)`,
-    `CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)`,
-  ]);
-
-  const insertEvent = db.prepare(
-    `INSERT INTO events (thread_id, type, payload, ts) VALUES (?, ?, ?, ?)`,
-  );
-  const pruneStmt = db.prepare(`DELETE FROM events WHERE ts < ?`);
-
-  function bufferEvent(threadId: string, type: string, payload: unknown): number | null {
-    let json: string;
-    try {
-      json = JSON.stringify(payload);
-    } catch {
-      bb.log.warn(`dropping unencodable event ${type} for ${threadId}`);
-      return null;
-    }
-    try {
-      const res = insertEvent.run(threadId, type, json, Date.now());
-      pruneStmt.run(Date.now() - retentionDays * 86_400_000);
-      const seq = Number(res.lastInsertRowid);
-      if (seq % 256 === 0) bb.log.debug(`event buffer at seq ${seq} (retention ${retentionDays}d)`);
-      return seq;
-    } catch (err) {
-      bb.log.error(`event buffer insert failed: ${String(err)}`);
-      return null;
-    }
-  }
+  bb.storage.migrate(db, MIGRATIONS);
+  const buffer = createEventBuffer(db);
 
   // Dirty set for the drain loop: threads with recent activity. Cursor per
-  // thread = the last server event seq we persisted.
+  // thread = the last server event seq we persisted, restored from `cursors` so
+  // a reload resumes rather than re-ingesting.
   const pending = new Set<string>();
-  const lastSeq = new Map<string, number>();
+  const lastSeq = buffer.cursors();
   const abort = new AbortController();
   let wakeWorker: (() => void) | null = null;
+
+  // Long-polled `eventsSince` calls parked with nothing to return. Woken by the
+  // drain the moment it commits a page, which is what turns the client's 800ms
+  // poll into an answer that arrives when the event does.
+  const waiters = new Set<() => void>();
+
+  function wakeWaiters() {
+    if (waiters.size === 0) return;
+    const woken = [...waiters];
+    waiters.clear();
+    for (const resolve of woken) resolve();
+  }
 
   function markDirty(threadId: string) {
     pending.add(threadId);
@@ -181,25 +180,48 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // Pull new events for one thread from the server store and persist them.
+  // Keeps asking until a page comes back short: one call per wake left a thread
+  // producing faster than DRAIN_PAGE waiting on the 3s watchdog for the rest.
   async function drainThread(threadId: string): Promise<void> {
     try {
-      const from = lastSeq.get(threadId) ?? 0;
-      const rows = await bb.sdk.threads.events.list({
-        threadId,
-        afterSeq: String(from),
-        limit: "500",
-      });
-      for (const row of rows) {
-        bufferEvent(row.threadId, row.type, row);
-        lastSeq.set(threadId, row.seq);
-      }
-      if (rows.length > 0) {
-        bb.log.debug(`buffered ${rows.length} events for ${threadId} (via seq ${lastSeq.get(threadId)})`);
+      for (;;) {
+        const from = lastSeq.get(threadId) ?? 0;
+        const rows = await bb.sdk.threads.events.list({
+          threadId,
+          afterSeq: String(from),
+          limit: String(DRAIN_PAGE),
+        });
+        if (rows.length === 0) return;
+        // The in-memory cursor advances only once the commit that persisted it
+        // returns; a rolled-back page must be re-drained, not skipped.
+        const { stored, skipped, last } = buffer.writeBatch(threadId, rows);
+        if (last > 0) lastSeq.set(threadId, last);
+        if (skipped > 0) bb.log.warn(`dropped ${skipped} unencodable events for ${threadId}`);
+        if (stored > 0) {
+          bb.log.debug(`buffered ${stored} events for ${threadId} (via seq ${last})`);
+          wakeWaiters();
+        }
+        if (rows.length < DRAIN_PAGE) return;
       }
     } catch (err) {
       if (!abort.signal.aborted) {
         bb.log.warn(`events.list failed for ${threadId}: ${String(err)}`);
       }
+    }
+  }
+
+  // Retention, on its own clock. This used to run as a DELETE behind every
+  // insert to enforce a window measured in days.
+  let lastPruneAt = 0;
+  function pruneIfDue() {
+    const now = Date.now();
+    if (now - lastPruneAt < PRUNE_INTERVAL_MS) return;
+    lastPruneAt = now;
+    try {
+      const removed = buffer.prune(now - retentionDays * 86_400_000);
+      if (removed > 0) bb.log.debug(`pruned ${removed} events past ${retentionDays}d`);
+    } catch (err) {
+      bb.log.error(`event buffer prune failed: ${String(err)}`);
     }
   }
 
@@ -271,12 +293,19 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         while (!serviceSignal.aborted && !abort.signal.aborted) {
           if (pending.size > 0) {
-            for (const threadId of pending) {
+            // Take the batch before draining it. Marking a thread dirty while
+            // the loop was already past it was a no-op on the Set, and the
+            // clear() that followed then erased the signal — the thread waited
+            // on the 3s watchdog. New marks now land in an empty set and are
+            // picked up by the next turn of this loop.
+            const batch = [...pending];
+            pending.clear();
+            for (const threadId of batch) {
               await drainThread(threadId);
             }
-            pending.clear();
             continue;
           }
+          pruneIfDue();
           // Idle-sleep, waking on realtime activity or a watchdog timer.
           await new Promise<void>((resolve) => {
             wakeWorker = resolve;
@@ -346,34 +375,51 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
 
-    eventsSince({ afterSeq, limit, threadId }) {
+    async eventsSince({ afterSeq, limit, threadId, waitMs }) {
       const seq = afterSeq ?? 0;
-      const rows = (
-        threadId
-          ? db
-              .prepare(
-                `SELECT seq, thread_id AS threadId, type, payload, ts
-                   FROM events WHERE thread_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
-              )
-              .all(threadId, seq, limit ?? 500)
-          : db
-              .prepare(
-                `SELECT seq, thread_id AS threadId, type, payload, ts
-                   FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?`,
-              )
-              .all(seq, limit ?? 500)
-      ) as {
-        seq: number;
-        threadId: string;
-        type: string;
-        payload: string;
-        ts: number;
-      }[];
-      const events = rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
-      const nextCursor = events.length > 0 ? events[events.length - 1]!.seq : seq;
-      return { events, nextCursor };
+      const first = readEvents(seq, limit ?? 500, threadId);
+      // Answer immediately when there is anything to say, and when the caller
+      // did not ask to wait — that is the pre-0.2.0 contract, unchanged.
+      if (first.events.length > 0 || !waitMs) return first;
+      // Keep waiting out the budget rather than returning on the first wake. A
+      // wake means *some* thread committed a page, not this caller's: on a busy
+      // server a single-shot wait is woken almost at once by unrelated traffic
+      // and answers empty, which collapses the long poll back into a poll.
+      const deadline = Date.now() + Math.min(waitMs, MAX_WAIT_MS);
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return readEvents(seq, limit ?? 500, threadId);
+        await waitForEvents(remaining);
+        // Disposal resolves every waiter; without this the loop would spin on a
+        // signal that will never carry rows.
+        if (abort.signal.aborted) return readEvents(seq, limit ?? 500, threadId);
+        const page = readEvents(seq, limit ?? 500, threadId);
+        if (page.events.length > 0) return page;
+      }
     },
   });
+
+  function readEvents(seq: number, limit: number, threadId?: string) {
+    return buffer.read(seq, limit, threadId);
+  }
+
+  /** Park until the drain commits a page, the timeout expires, or the plugin is
+   * disposed. A wake is a hint, not a promise: the caller re-queries, and a
+   * per-thread waiter woken by another thread's activity simply answers empty. */
+  function waitForEvents(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (abort.signal.aborted) return resolve();
+      const done = () => {
+        clearTimeout(timer);
+        waiters.delete(done);
+        abort.signal.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      waiters.add(done);
+      abort.signal.addEventListener("abort", done, { once: true });
+    });
+  }
 
   // ---- CLI: server discovery for the client ----
   bb.cli.register({

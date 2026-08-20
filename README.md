@@ -145,6 +145,7 @@ actions there are ctrl chords.
 | `ctrl-x` | stop the thread |
 | `ctrl-r` | toggle reasoning deltas |
 | `ctrl-t` | compact |
+| `ctrl-s` | hide / show the thread list |
 | `tab`, `esc` | back to the list |
 
 ### Slash menu
@@ -203,6 +204,8 @@ Mouse reporting means the terminal no longer owns drag-select; hold `shift` (or
   caps at 44 columns. Provider identifiers stay in thread detail, not list rows.
 - Below 72 columns, only the focused list or detail pane is rendered; `tab`
   switches panes after a thread is open.
+- `ctrl-s` folds the list away at any width, giving an open thread the whole
+  frame. Focusing the list again — `tab` or `esc` — brings it back.
 - The composer has its own focus-colored border, while contextual keyboard help
   renders beneath the pane borders.
 - The client uses the terminal alternate-screen buffer and stable frame geometry

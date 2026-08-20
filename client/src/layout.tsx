@@ -22,8 +22,16 @@ export function transcriptRows(height: number, menuRows = 0, planRows = 0, extra
   return Math.max(3, height - 10 - menuRows - planRows - extraRows);
 }
 
-export function calculatePaneLayout(columns: number, focus: PaneFocus): PaneLayout {
+export function calculatePaneLayout(
+  columns: number,
+  focus: PaneFocus,
+  listHidden = false,
+): PaneLayout {
   const usableColumns = Math.max(1, columns - 1);
+
+  // Hidden is the compact case without the focus rule: the thread pane owns the
+  // width whether or not it holds focus.
+  if (listHidden) return { compact: true, listWidth: 0, detailWidth: usableColumns };
 
   if (columns < 72) {
     return {
@@ -53,8 +61,10 @@ export function hitTest(
   focus: PaneFocus,
   x: number,
   y: number,
+  listHidden = false,
 ): MouseTarget {
-  const layout = calculatePaneLayout(columns, focus);
+  const layout = calculatePaneLayout(columns, focus, listHidden);
+  if (listHidden) return { pane: "detail" };
   const paneTop = 2; // the top bar owns row 1
   const paneBottom = paneTop + Math.max(8, rows - 1) - 2 - 1;
   if (y < paneTop || y > paneBottom) return null;
@@ -421,6 +431,8 @@ export type WorkspaceLayoutProps = {
   columns: number;
   rows: number;
   focus: PaneFocus;
+  /** Thread list folded away, giving the open thread the whole frame. */
+  listHidden?: boolean;
   topBar: ReactNode;
   list: WorkspaceListProps;
   detail?: WorkspaceDetailProps;
@@ -428,11 +440,11 @@ export type WorkspaceLayoutProps = {
 
 /** Compose stable panes and keep contextual shortcuts outside their borders. */
 export function WorkspaceLayout(props: WorkspaceLayoutProps) {
-  const layout = calculatePaneLayout(props.columns, props.focus);
+  const layout = calculatePaneLayout(props.columns, props.focus, props.listHidden);
   const frameHeight = Math.max(8, props.rows - 1);
   const paneHeight = frameHeight - 2;
-  const showList = !layout.compact || props.focus === "list";
-  const showDetail = !layout.compact || props.focus === "detail";
+  const showList = !props.listHidden && (!layout.compact || props.focus === "list");
+  const showDetail = props.listHidden === true || !layout.compact || props.focus === "detail";
 
   return (
     <Box flexDirection="column" height={frameHeight}>
@@ -464,13 +476,28 @@ export function WorkspaceLayout(props: WorkspaceLayoutProps) {
           </Box>
         ) : null}
       </Box>
-      <ShortcutFooter compact={layout.compact} detailOpen={props.detail !== undefined} focus={props.focus} />
+      <ShortcutFooter
+        compact={layout.compact}
+        detailOpen={props.detail !== undefined}
+        focus={props.focus}
+        listHidden={props.listHidden}
+      />
     </Box>
   );
 }
 
-export function ShortcutFooter(props: { compact: boolean; detailOpen: boolean; focus: PaneFocus }) {
-  const shortcuts = props.compact
+export function ShortcutFooter(props: {
+  compact: boolean;
+  detailOpen: boolean;
+  focus: PaneFocus;
+  listHidden?: boolean;
+}) {
+  const listKey = props.listHidden ? "^s show list" : "^s hide list";
+  // Hidden comes first: the state that removed the list from the screen is the
+  // one that has to say how to get it back.
+  const shortcuts = props.listHidden
+    ? `↑/↓ scroll · enter send · ⇧enter/^o newline · ^x stop · ${listKey} · tab list`
+    : props.compact
     ? props.detailOpen && props.focus === "detail"
       ? "↑/↓ scroll · enter send · ^o newline · ^x stop · tab list"
       : "↑/↓ select · ←/→ fold · / filter · enter open · n new · q quit"
@@ -478,7 +505,7 @@ export function ShortcutFooter(props: { compact: boolean; detailOpen: boolean; f
       ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · esc home · q quit"
       : props.focus === "list"
         ? "↑/↓ select · ←/→ fold · / filter · enter open · n new · tab composer · esc home · q quit"
-        : "↑/↓ scroll · enter send · ⇧enter/^o newline · ^x stop · /model · tab list · esc list";
+        : `↑/↓ scroll · enter send · ⇧enter/^o newline · ^x stop · ${listKey} · tab list`;
   return (
     <Text dimColor wrap="truncate">
       {shortcuts}

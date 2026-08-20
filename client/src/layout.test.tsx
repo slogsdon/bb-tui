@@ -8,6 +8,7 @@ import { renderBlocks } from "./markdown.js";
 import {
   calculatePaneLayout,
   contextRow,
+  hitTest,
   menuHeight,
   ThreadListPane,
   ThreadPane,
@@ -619,4 +620,54 @@ test("an error gets its own row, nearest the input", () => {
 test("the spinner and error rows come out of the transcript, not the frame", () => {
   assert.equal(transcriptRows(24), 14);
   assert.equal(transcriptRows(24, 0, 0, 2), 12);
+});
+
+test("a hidden list gives the thread pane the whole frame", () => {
+  const detail = {
+    thread: sampleThread,
+    projectName: "bb-tui",
+    elapsedSeconds: null,
+    hostNames: new Map(),
+    detailLines: [line("DETAIL CONTENT")],
+    scrollUp: 0,
+    composer: emptyComposer,
+    focus: "detail" as const,
+  };
+  const list = {
+    rows: [{ kind: "thread" as const, thread: sampleThread }],
+    selectedIndex: 0,
+    firstVisible: 0,
+    visibleCount: 1,
+    activityByThread: new Map(),
+    hostNames: new Map(),
+  };
+  const frame = renderFrame(
+    <WorkspaceLayout
+      columns={120}
+      rows={24}
+      focus="detail"
+      listHidden
+      topBar="bb-tui · active"
+      list={list}
+      detail={detail}
+    />,
+    120,
+    24,
+  );
+
+  assert.match(frame, /DETAIL CONTENT/);
+  // One pane on screen, not two: the list border is gone entirely.
+  assert.equal(frame.match(/╭/g)?.length, 1);
+  assert.match(frame.split("\n").at(-1) ?? "", /\^s show list/);
+  // The pane widens to the frame instead of leaving the list's columns blank.
+  assert.deepEqual(calculatePaneLayout(120, "detail", true), {
+    compact: true,
+    listWidth: 0,
+    detailWidth: 119,
+  });
+});
+
+test("with the list hidden every click lands in the thread pane", () => {
+  assert.deepEqual(hitTest(120, 40, "detail", 5, 8, true), { pane: "detail" });
+  assert.deepEqual(hitTest(120, 40, "detail", 5, 8), { pane: "list", row: 5 });
 });

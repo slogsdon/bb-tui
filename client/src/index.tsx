@@ -189,6 +189,9 @@ export default function App() {
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [menuSelection, setMenuSelection] = useState(INITIAL_MENU_SELECTION);
   const [menuDismissed, setMenuDismissed] = useState(false);
+  // Thread list folded away for the reading width. Only reachable with a thread
+  // open — with none there would be nothing left on screen.
+  const [listHidden, setListHidden] = useState(false);
 
   const cursorRef = useRef(0);
   const threadCursorRef = useRef(new Map<string, number>());
@@ -555,6 +558,7 @@ export default function App() {
   }
 
   function backToHome() {
+    setListHidden(false);
     setView({ kind: "home" });
     setFocus("list");
     setComposer(EMPTY);
@@ -696,6 +700,7 @@ export default function App() {
     }
     if (view.kind === "detail") {
       if (focus === "list") {
+        if (key.ctrl && data === "s") return setListHidden(true);
         if (key.upArrow) setSel((s) => Math.max(0, s - 1));
         else if (key.downArrow) setSel((s) => Math.min(listRows.length - 1, s + 1));
         else if (key.return) activateRow();
@@ -729,8 +734,13 @@ export default function App() {
       if (key.return && key.shift) setComposer((c) => applyKey(c, "\n", {}));
       else if (key.return) void send();
       else if (key.ctrl && data === "o") setComposer((c) => applyKey(c, "\n", {}));
-      else if (key.escape) setFocus("list");
-      else if (key.tab) setFocus("list");
+      else if (key.ctrl && data === "s") setListHidden((hidden) => !hidden);
+      // Focusing the list has to show it; focus on an invisible pane is a
+      // keyboard dead end.
+      else if (key.escape || key.tab) {
+        setListHidden(false);
+        setFocus("list");
+      }
       // Arrows keep scrolling the transcript, as before; left/right reach the
       // composer so the cursor can still move.
       else if (key.upArrow || key.pageUp) setScrollUp((s) => s + 1);
@@ -845,7 +855,7 @@ export default function App() {
   // the handler closes over state that changes every frame.
   const mouseRef = useRef<(event: MouseEvent) => void>(() => {});
   mouseRef.current = (event: MouseEvent) => {
-    const target = hitTest(cols, rows, focus, event.x, event.y);
+    const target = hitTest(cols, rows, focus, event.x, event.y, listHidden);
     if (!target) return;
     if (event.kind === "wheel") {
       const up = event.direction === "up";
@@ -1003,7 +1013,7 @@ export default function App() {
     return m;
   }, [tail]);
 
-  const paneLayout = calculatePaneLayout(cols, focus);
+  const paneLayout = calculatePaneLayout(cols, focus, listHidden);
   const detailInnerW = Math.max(8, (paneLayout.detailWidth || cols - 1) - 4);
   const composerLayout = useMemo(
     () => layoutComposer(composer, detailInnerW, MAX_INPUT_ROWS),
@@ -1106,6 +1116,7 @@ export default function App() {
       columns={cols}
       rows={rows}
       focus={focus}
+      listHidden={listHidden && view.kind === "detail"}
       topBar={
         <>
           <Text color="cyan" bold>

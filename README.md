@@ -23,8 +23,9 @@ event log the TUI can poll and resume from.
 └─────────────────┘└─────────────────────────────────────────┘
 ```
 
-> **Development status:** the plugin can be installed from a checkout or Git
-> release. The client still runs from source; no bundled `bb-tui` binary exists.
+> **Development status:** both halves build and package for npm, and release
+> together from one tag. Nothing is published to npm yet — until the first
+> `v0.2.0` tag, install from a checkout or a Git ref.
 
 ## Status
 
@@ -40,7 +41,7 @@ the composer all work; terminals and queue UX do not exist yet.
   tool calls and reasoning as they stream, a spinner while a turn is
   outstanding, errors in the pane itself, mouse scroll and click, and a
   bordered composer.
-- **Not yet** — terminal panes, queue UX, a bundled single-file client.
+- **Not yet** — terminal panes, queue UX, an npm release.
 
 ## Requirements
 
@@ -49,6 +50,22 @@ the composer all work; terminals and queue UX do not exist yet.
 - A terminal with color and alternate-screen support
 
 ## Install
+
+Two commands, once the packages are published (see the development-status note
+above — this is the shape of a release, not a live path yet):
+
+```sh
+bb plugin install npm:bb-plugin-bb-tui@^0.2.0 --yes   # the server half
+npx bb-tui                                            # the terminal UI
+```
+
+`npm i -g bb-tui` installs the client once and gives you `bb-tui` on PATH.
+`bb tui` on its own prints those commands back, so the plugin never leaves you
+guessing where the client went — a plugin CLI command runs inside the bb server
+and has no terminal to draw on, which is why the TUI is its own binary rather
+than a `bb` subcommand.
+
+### From a checkout
 
 ```sh
 git clone https://github.com/slogsdon/bb-tui.git
@@ -70,17 +87,28 @@ To make the installed plugin track releases instead of the checkout, replace
 step 2 with:
 
 ```sh
-bb plugin install git:https://github.com/slogsdon/bb-tui.git@^0.1.0 --plugin bb-tui
+bb plugin install git:https://github.com/slogsdon/bb-tui.git@^0.2.0 --plugin bb-tui
 ```
+
+The client and the plugin are versioned in lockstep and released from one tag,
+so `npm:bb-plugin-bb-tui@X`, `git:…@vX`, and `bb-tui@X` always describe the
+same commit. They are not coupled at runtime: the client capability-gates on
+the version the plugin reports, so a newer client keeps working against an
+older plugin (it just polls instead of long-polling) rather than demanding an
+upgrade.
 
 There is also a headless CLI, useful for scripting and for checking that the
 plugin is reachable before you open the UI:
 
 ```sh
-npm --prefix client run cli -- info
-npm --prefix client run cli -- list
-npm --prefix client run cli -- watch --thread <thread-id>
+bb-tui-cli info                            # or: npm --prefix client run cli -- info
+bb-tui-cli list
+bb-tui-cli watch --thread <thread-id>
 ```
+
+It is also where discovery failures read best. The client separates the three
+states that have different fixes — no bb server reachable, a server without the
+plugin, and a plugin answering — and prints the exact command for the second.
 
 ## Configuration
 

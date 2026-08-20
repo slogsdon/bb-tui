@@ -197,10 +197,39 @@ export interface Project {
   [k: string]: unknown;
 }
 
-/** Run a bb CLI command with --json and parse stdout. */
-export async function bbJson<T>(args: string[]): Promise<T> {
-  const { stdout } = await execFileP("bb", [...args, "--json"], { timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
+/** Argument vector for a bb command whose trailing arguments are text the user
+ * typed. The CLI's parser reads any argument starting with `-` as an option, so
+ * a message that begins with a Markdown bullet is rejected as an unknown
+ * option. Everything the user wrote goes after `--`, and `--json` has to
+ * precede that marker to still be read as an option. */
+export function cliArgs(command: string[], operands: string[] = []): string[] {
+  return operands.length === 0
+    ? [...command, "--json"]
+    : [...command, "--json", "--", ...operands];
+}
+
+/** Run a bb CLI command with --json and parse stdout. `operands` is for
+ * arguments the CLI takes positionally; pass user text there, never in
+ * `command`. */
+export async function bbJson<T>(command: string[], operands: string[] = []): Promise<T> {
+  const { stdout } = await execFileP("bb", cliArgs(command, operands), {
+    timeout: 120_000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
   return JSON.parse(stdout) as T;
+}
+
+/** The part of a CLI failure worth showing. execFile's message leads with the
+ * whole command line — for `thread tell` that is the user's own message echoed
+ * back — and buries the reason at the end, which is the one line that helps. */
+export function cliMessage(error: unknown): string {
+  const withStderr = error as { stderr?: string; message?: string } | null;
+  const text = (withStderr?.stderr ?? "").trim() || String(withStderr?.message ?? error);
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("Command failed:"));
+  return lines[lines.length - 1] ?? text;
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -258,7 +287,7 @@ export async function threadShow(threadId: string): Promise<ThreadRow> {
 }
 
 export function tellThread(threadId: string, message: string): Promise<unknown> {
-  return bbJson(["thread", "tell", threadId, message]);
+  return bbJson(["thread", "tell"], [threadId, message]);
 }
 
 export function stopThread(threadId: string): Promise<unknown> {

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdin, useStdout, render } from "ink";
 import {
   cancelPlan,
+  cliMessage,
   compactThread,
   coveredByTimeline,
   discover,
@@ -475,7 +476,7 @@ export default function App() {
       setOlderCursor(tl.page?.hasOlderRows ? (tl.page.olderCursor ?? null) : null);
       setStatus(blocks.length > 0 ? `loaded ${blocks.length} older rows` : "at the start of the thread");
     } catch (err) {
-      setStatus(`history error: ${String(err)}`);
+      setStatus(`history error: ${cliMessage(err)}`);
     } finally {
       pagingRef.current = false;
     }
@@ -537,8 +538,8 @@ export default function App() {
       assembleTranscripts(evs);
       setStatus(`${t.providerId} · ${t.status}`);
     } catch (err) {
-      setStatus(`timeline error: ${String(err)}`);
-      setThreadError(`timeline error: ${String(err)}`);
+      setStatus(`timeline error: ${cliMessage(err)}`);
+      setThreadError(`timeline error: ${cliMessage(err)}`);
     }
   }
 
@@ -586,8 +587,8 @@ export default function App() {
         setStatus(`/${resolved.name} done`);
         refreshThreadStatuses();
       } catch (err) {
-        setStatus(`/${resolved.name} error: ${String(err)}`);
-        setThreadError(`/${resolved.name}: ${String(err)}`);
+        setStatus(`/${resolved.name} error: ${cliMessage(err)}`);
+        setThreadError(`/${resolved.name}: ${cliMessage(err)}`);
       }
       return;
     }
@@ -600,8 +601,8 @@ export default function App() {
       setStatus(`sent → ${view.thread.providerId}`);
       refreshThreadStatuses();
     } catch (err) {
-      setStatus(`tell error: ${String(err)}`);
-      setThreadError(`send failed: ${String(err)}`);
+      setStatus(`tell error: ${cliMessage(err)}`);
+      setThreadError(`send failed: ${cliMessage(err)}`);
     }
   }
 
@@ -636,7 +637,7 @@ export default function App() {
       setFocus("detail");
       await openThread(t);
     } catch (err) {
-      setStatus(`spawn error: ${String(err)}`);
+      setStatus(`spawn error: ${cliMessage(err)}`);
     }
   }
 
@@ -650,8 +651,8 @@ export default function App() {
       setExecution((prev) => (prev ? { ...prev, model } : prev));
       setStatus(`model → ${model}`);
     } catch (err) {
-      setStatus(`model error: ${String(err)}`);
-      setThreadError(`model error: ${String(err)}`);
+      setStatus(`model error: ${cliMessage(err)}`);
+      setThreadError(`model error: ${cliMessage(err)}`);
     }
   }
 

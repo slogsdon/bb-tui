@@ -581,7 +581,13 @@ test("a waiting turn gets a spinner row above the composer", () => {
   const rows = frame.split("\n");
   const at = (text: string) => rows.findIndex((row) => row.includes(text));
   assert.ok(at("\u2819 working 12s") >= 0);
+  // The hint has to name the key that actually stops a thread: esc moves focus
+  // to the list, which the footer says at the same time.
+  assert.match(frame, /working 12s · \^x to stop/);
+  // Directly under the transcript it is waiting to extend, above the context
+  // line rather than buried below it.
   assert.ok(at("Agent response") < at("\u2819 working 12s"));
+  assert.ok(at("\u2819 working 12s") < at("bb-tui"));
   assert.ok(at("\u2819 working 12s") < at("MESSAGE"));
 });
 

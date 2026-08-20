@@ -352,6 +352,14 @@ export function ThreadPane(props: ThreadPaneProps) {
           ),
         )}
       </Box>
+      {props.waiting && (
+        <Text wrap="truncate">
+          <Text color="cyan">
+            {props.waiting.frame} working {props.waiting.seconds}s
+          </Text>
+          <Text dimColor> · ^x to stop</Text>
+        </Text>
+      )}
       {/* Context, not counters: where this thread runs and what it is doing. */}
       <Text dimColor wrap="truncate">
         {clamped === 0 ? "▼ bottom" : `▲ ${clamped}`}
@@ -359,14 +367,6 @@ export function ThreadPane(props: ThreadPaneProps) {
         {props.thread.hasPendingInteraction ? " · " : ""}
         {props.thread.hasPendingInteraction ? <Text color="yellow">needs you</Text> : ""}
       </Text>
-      {props.waiting && (
-        <Text wrap="truncate">
-          <Text color="cyan">
-            {props.waiting.frame} working {props.waiting.seconds}s
-          </Text>
-          <Text dimColor> · esc to interrupt</Text>
-        </Text>
-      )}
       {props.errorText && (
         <Text wrap="truncate">
           <Text color="red" bold>

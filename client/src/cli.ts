@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // bb-tui headless CLI — also the smoke-test harness.
 // Commands:
 //   bb-tui info                                      discovery facts

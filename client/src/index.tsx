@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // bb-tui — Ink frontend matching the bb app layout: left sidebar (Needs
 // attention / Recent sections) + right thread pane (header, timeline,
 // composer). Tab switches focus between list and composer. Performance:

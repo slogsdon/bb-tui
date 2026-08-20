@@ -27,12 +27,12 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { createEventBuffer, DRAIN_PAGE, MIGRATIONS, PRUNE_INTERVAL_MS } from "./buffer.js";
 
-/** Kept in step with package.json `version` by hand; the manifest is the
- * source of truth for installs, this is only what the client displays. The
- * client also reads it as a capability gate: 0.2.0 is the first build whose
+/** Kept in step with package.json `version` by `version.test.ts`; the manifest
+ * is the source of truth for installs, this is only what the client displays.
+ * The client also reads it as a capability gate: 0.2.0 is the first build whose
  * `eventsSince` accepts `waitMs`, and the input schema is strict, so an older
  * plugin rejects the field outright rather than ignoring it. */
-const PLUGIN_VERSION = "0.2.0";
+export const PLUGIN_VERSION = "0.2.0";
 
 /** Longest a long-polled `eventsSince` parks before answering empty. Under any
  * intermediary's idle timeout, and short enough that a wedged connection costs

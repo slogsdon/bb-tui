@@ -585,6 +585,31 @@ test("a waiting turn gets a spinner row above the composer", () => {
   assert.ok(at("\u2819 working 12s") < at("MESSAGE"));
 });
 
+test("an error gets its own row, nearest the input", () => {
+  const frame = renderFrame(
+    <ThreadPane
+      thread={sampleThread}
+      projectName="bb-tui"
+      elapsedSeconds={null}
+      hostNames={new Map()}
+      detailLines={[line("Agent response")]}
+      scrollUp={0}
+      composer={emptyComposer}
+      focus="detail"
+      waiting={{ seconds: 12, frame: "\u2819" }}
+      errorText="send failed: connection refused"
+      width={83}
+      height={24}
+    />,
+  );
+
+  const rows = frame.split("\n");
+  const at = (text: string) => rows.findIndex((row) => row.includes(text));
+  assert.ok(at("connection refused") >= 0);
+  assert.ok(at("\u2819 working 12s") < at("connection refused"));
+  assert.ok(at("connection refused") < at("MESSAGE"));
+});
+
 test("the spinner and error rows come out of the transcript, not the frame", () => {
   assert.equal(transcriptRows(24), 14);
   assert.equal(transcriptRows(24, 0, 0, 2), 12);

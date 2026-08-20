@@ -193,6 +193,10 @@ export type ThreadPaneProps = {
   /** Set while a turn is outstanding — from the moment a message is sent, not
    * from the moment the provider gets around to reporting a turn. */
   waiting?: { seconds: number; frame: string } | null;
+  /** The last thing that went wrong on this thread. Lives in the pane rather
+   * than the top bar, because a one-line status shared with routine chatter is
+   * where errors go to be missed. */
+  errorText?: string | null;
   /** Debug counters, shown only when BB_TUI_DEBUG is set. */
   debug?: { timelineLength: number; conversationLive: number; cursorSeq: number };
   width: number;
@@ -295,7 +299,7 @@ export function ThreadPane(props: ThreadPaneProps) {
   const menuRows = menuHeight(props.menu);
   const menuActive = menuRows > 0;
   const planRows = props.planMode ? 1 : 0;
-  const extraRows = props.waiting ? 1 : 0;
+  const extraRows = (props.waiting ? 1 : 0) + (props.errorText ? 1 : 0);
   const visibleCount = transcriptRows(props.height, menuRows, planRows, extraRows);
   const scrollable = Math.max(0, props.detailLines.length - visibleCount);
   const clamped = Math.min(props.scrollUp, scrollable);
@@ -361,6 +365,13 @@ export function ThreadPane(props: ThreadPaneProps) {
             {props.waiting.frame} working {props.waiting.seconds}s
           </Text>
           <Text dimColor> · esc to interrupt</Text>
+        </Text>
+      )}
+      {props.errorText && (
+        <Text wrap="truncate">
+          <Text color="red" bold>
+            ▍{props.errorText}
+          </Text>
         </Text>
       )}
       {props.planMode && (

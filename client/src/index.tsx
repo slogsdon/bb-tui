@@ -178,6 +178,9 @@ export default function App() {
   // second or two, and that gap is exactly when the user wonders whether the
   // key press registered.
   const [sentAt, setSentAt] = useState<number | null>(null);
+  // What last went wrong on the open thread, shown in the pane rather than in
+  // the top bar's shared status line.
+  const [threadError, setThreadError] = useState<string | null>(null);
   const [clockTick, setClockTick] = useState(0);
   const [repainting, setRepainting] = useState(false);
   const [scrollUp, setScrollUp] = useState(0);
@@ -329,6 +332,9 @@ export default function App() {
               setSentAt(null);
             } else if (e.type === "turn/completed") {
               setTurnStartedAt(null);
+              setSentAt(null);
+            } else if (e.type === "provider/error" || e.type === "system/error") {
+              setThreadError(eventActivityLabel(e) ?? "provider error");
               setSentAt(null);
             }
           }
@@ -516,6 +522,7 @@ export default function App() {
     setComposer(EMPTY);
     setScrollUp(0);
     setSentAt(null);
+    setThreadError(null);
     setStatus(`opening ${t.id}`);
     // Project-scoped, since project skills override user and builtin ones.
     void listSkills(t.projectId)
@@ -531,6 +538,7 @@ export default function App() {
       setStatus(`${t.providerId} · ${t.status}`);
     } catch (err) {
       setStatus(`timeline error: ${String(err)}`);
+      setThreadError(`timeline error: ${String(err)}`);
     }
   }
 
@@ -566,6 +574,8 @@ export default function App() {
     const resolved = resolveSlash(composer.text);
     setComposer(EMPTY);
     setScrollUp(0);
+    // Sending is the user's answer to whatever went wrong last.
+    setThreadError(null);
 
     // A message that *is* a bb command runs the same operation the app composer
     // does; `bb thread tell` is raw and would send the literal string instead.
@@ -577,6 +587,7 @@ export default function App() {
         refreshThreadStatuses();
       } catch (err) {
         setStatus(`/${resolved.name} error: ${String(err)}`);
+        setThreadError(`/${resolved.name}: ${String(err)}`);
       }
       return;
     }
@@ -590,6 +601,7 @@ export default function App() {
       refreshThreadStatuses();
     } catch (err) {
       setStatus(`tell error: ${String(err)}`);
+      setThreadError(`send failed: ${String(err)}`);
     }
   }
 
@@ -639,6 +651,7 @@ export default function App() {
       setStatus(`model → ${model}`);
     } catch (err) {
       setStatus(`model error: ${String(err)}`);
+      setThreadError(`model error: ${String(err)}`);
     }
   }
 
@@ -1026,7 +1039,7 @@ export default function App() {
     Math.max(8, rows - 1) - 2,
     menuHeight(detailMenu),
     planMode ? 1 : 0,
-    waiting ? 1 : 0,
+    (waiting ? 1 : 0) + (threadError ? 1 : 0),
   );
   const maxScrollUp = Math.max(0, detailLineCount - visibleTranscriptRows);
 
@@ -1133,6 +1146,7 @@ export default function App() {
               execution,
               planMode,
               waiting,
+              errorText: threadError,
               debug: process.env.BB_TUI_DEBUG
                 ? {
                     timelineLength: timeline.length,

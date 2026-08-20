@@ -18,8 +18,8 @@ export type PaneLayout = {
  * ask the same question to size its scroll ceiling and decide when to page in
  * history — two copies of this arithmetic would drift apart the first time the
  * pane's chrome changes height. */
-export function transcriptRows(height: number, menuRows = 0, planRows = 0): number {
-  return Math.max(3, height - 10 - menuRows - planRows);
+export function transcriptRows(height: number, menuRows = 0, planRows = 0, extraRows = 0): number {
+  return Math.max(3, height - 10 - menuRows - planRows - extraRows);
 }
 
 export function calculatePaneLayout(columns: number, focus: PaneFocus): PaneLayout {
@@ -190,6 +190,9 @@ export type ThreadPaneProps = {
   execution?: Execution | null;
   /** Set while the provider is in plan mode. */
   planMode?: { prompt: string } | null;
+  /** Set while a turn is outstanding — from the moment a message is sent, not
+   * from the moment the provider gets around to reporting a turn. */
+  waiting?: { seconds: number; frame: string } | null;
   /** Debug counters, shown only when BB_TUI_DEBUG is set. */
   debug?: { timelineLength: number; conversationLive: number; cursorSeq: number };
   width: number;
@@ -213,9 +216,9 @@ export function contextRow(props: ThreadPaneProps): string[] {
     // The model is the more specific fact and implies the provider, so it takes
     // the slot rather than adding one. Provider stands in until it arrives.
     props.execution?.model ?? thread.providerId,
-    running && props.elapsedSeconds !== null
-      ? `working ${props.elapsedSeconds}s · esc to interrupt`
-      : thread.status,
+    // The spinner row carries "working"; repeating it here would only cost
+    // width the model id and permission mode need.
+    thread.status,
   ];
   if (props.debug) {
     parts.push(
@@ -292,7 +295,8 @@ export function ThreadPane(props: ThreadPaneProps) {
   const menuRows = menuHeight(props.menu);
   const menuActive = menuRows > 0;
   const planRows = props.planMode ? 1 : 0;
-  const visibleCount = transcriptRows(props.height, menuRows, planRows);
+  const extraRows = props.waiting ? 1 : 0;
+  const visibleCount = transcriptRows(props.height, menuRows, planRows, extraRows);
   const scrollable = Math.max(0, props.detailLines.length - visibleCount);
   const clamped = Math.min(props.scrollUp, scrollable);
   const from = Math.max(0, props.detailLines.length - visibleCount - clamped);
@@ -351,6 +355,14 @@ export function ThreadPane(props: ThreadPaneProps) {
         {props.thread.hasPendingInteraction ? " · " : ""}
         {props.thread.hasPendingInteraction ? <Text color="yellow">needs you</Text> : ""}
       </Text>
+      {props.waiting && (
+        <Text wrap="truncate">
+          <Text color="cyan">
+            {props.waiting.frame} working {props.waiting.seconds}s
+          </Text>
+          <Text dimColor> · esc to interrupt</Text>
+        </Text>
+      )}
       {props.planMode && (
         <Text wrap="truncate">
           <Text color="yellow">▍plan mode</Text>

@@ -239,13 +239,8 @@ test("the context row carries where the thread runs, not debug counters", () => 
     height: 24,
   });
 
-  assert.deepEqual(parts, [
-    "bb-tui",
-    "mac-mini",
-    "fix/pane-scroll",
-    "codex",
-    "working 18s · esc to interrupt",
-  ]);
+  // "working" belongs to the spinner row; this row carries stable context.
+  assert.deepEqual(parts, ["bb-tui", "mac-mini", "fix/pane-scroll", "codex", "active"]);
   assert.ok(!parts.some((p) => p.includes("seq")));
 });
 
@@ -564,4 +559,33 @@ test("model menu renders its own section, one row per model", () => {
   assert.equal(at("claude-opus-5") - at("claude-fable-5"), 1);
   assert.equal(at("claude-sonnet-5") - at("claude-opus-5"), 1);
   assert.equal(menuHeight({ entries, selected: 1, firstVisible: 0 }), 6);
+});
+
+test("a waiting turn gets a spinner row above the composer", () => {
+  const frame = renderFrame(
+    <ThreadPane
+      thread={sampleThread}
+      projectName="bb-tui"
+      elapsedSeconds={12}
+      hostNames={new Map()}
+      detailLines={[line("Agent response")]}
+      scrollUp={0}
+      composer={emptyComposer}
+      focus="detail"
+      waiting={{ seconds: 12, frame: "\u2819" }}
+      width={83}
+      height={24}
+    />,
+  );
+
+  const rows = frame.split("\n");
+  const at = (text: string) => rows.findIndex((row) => row.includes(text));
+  assert.ok(at("\u2819 working 12s") >= 0);
+  assert.ok(at("Agent response") < at("\u2819 working 12s"));
+  assert.ok(at("\u2819 working 12s") < at("MESSAGE"));
+});
+
+test("the spinner and error rows come out of the transcript, not the frame", () => {
+  assert.equal(transcriptRows(24), 14);
+  assert.equal(transcriptRows(24, 0, 0, 2), 12);
 });

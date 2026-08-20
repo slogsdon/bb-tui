@@ -37,8 +37,8 @@ the composer all work; terminals and queue UX do not exist yet.
 - **Client** — split layout: threads grouped under their project with fold
   markers and counts, and a thread pane with a streaming transcript, markdown
   rendering (tables included), a slash-command menu (with a `/model` picker),
-  tool calls and reasoning as they stream, mouse scroll and click, and a
-  bordered composer.
+  tool calls and reasoning as they stream, a spinner while a turn is
+  outstanding, mouse scroll and click, and a bordered composer.
 - **Not yet** — terminal panes, queue UX, a bundled single-file client.
 
 ## Requirements

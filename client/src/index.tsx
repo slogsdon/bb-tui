@@ -83,6 +83,10 @@ const MAX_TRANSCRIPT_BLOCKS = 200;
 // Scroll-back ceiling. Every loaded block is re-wrapped whenever the pane width
 // changes, so history is capped rather than unbounded.
 const MAX_HISTORY_BLOCKS = 600;
+// Braille spinner, one frame per tick.
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_MS = 120;
+const UNANSWERED_SEND_MS = 60_000;
 
 const isEraseKey = (key: { backspace?: boolean; delete?: boolean }): boolean => !!key.backspace || !!key.delete;
 
@@ -170,6 +174,10 @@ export default function App() {
   const [filter, setFilter] = useState("");
   const [filtering, setFiltering] = useState(false);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  // The moment a message left the composer. A turn does not report itself for a
+  // second or two, and that gap is exactly when the user wonders whether the
+  // key press registered.
+  const [sentAt, setSentAt] = useState<number | null>(null);
   const [clockTick, setClockTick] = useState(0);
   const [repainting, setRepainting] = useState(false);
   const [scrollUp, setScrollUp] = useState(0);
@@ -316,8 +324,13 @@ export default function App() {
           // Turn clock for the open thread: how long has it been working.
           for (const e of fresh) {
             if (focusId && e.threadId !== focusId) continue;
-            if (e.type === "turn/started") setTurnStartedAt(e.ts || Date.now());
-            else if (e.type === "turn/completed") setTurnStartedAt(null);
+            if (e.type === "turn/started") {
+              setTurnStartedAt(e.ts || Date.now());
+              setSentAt(null);
+            } else if (e.type === "turn/completed") {
+              setTurnStartedAt(null);
+              setSentAt(null);
+            }
           }
           // Status row refreshes only on status-relevant events, throttled.
           const hasStatus = fresh.some((e) => STATUS_EVENTS.has(e.type));
@@ -349,15 +362,33 @@ export default function App() {
 
   // A running turn needs a second hand, and nothing else re-renders between
   // events. Only ticks while a turn is actually open.
+  // A turn reports itself within a second or two of a send. If one never does,
+  // the send is the last honest thing we know — stop claiming work is underway
+  // rather than spinning forever.
+  const pendingSend = sentAt !== null && Date.now() - sentAt < UNANSWERED_SEND_MS ? sentAt : null;
+  const waitingSince = turnStartedAt ?? pendingSend;
   useEffect(() => {
-    if (turnStartedAt === null) return;
-    const t = setInterval(() => setClockTick((n) => n + 1), 1000);
+    if (waitingSince === null) return;
+    // Fast enough that the spinner reads as motion; the pane redraws are cheap
+    // next to the poll they sit between.
+    const t = setInterval(() => setClockTick((n) => n + 1), SPINNER_MS);
     return () => clearInterval(t);
-  }, [turnStartedAt]);
+  }, [waitingSince]);
 
   const elapsedSeconds = useMemo(
     () => (turnStartedAt === null ? null : Math.max(0, Math.round((Date.now() - turnStartedAt) / 1000))),
     [turnStartedAt, clockTick],
+  );
+
+  const waiting = useMemo(
+    () =>
+      waitingSince === null
+        ? null
+        : {
+            seconds: Math.max(0, Math.round((Date.now() - waitingSince) / 1000)),
+            frame: SPINNER_FRAMES[clockTick % SPINNER_FRAMES.length]!,
+          },
+    [waitingSince, clockTick],
   );
 
   function assembleTranscripts(events: BufferedEvent[]) {
@@ -484,6 +515,7 @@ export default function App() {
     setPlanMode(null);
     setComposer(EMPTY);
     setScrollUp(0);
+    setSentAt(null);
     setStatus(`opening ${t.id}`);
     // Project-scoped, since project skills override user and builtin ones.
     void listSkills(t.projectId)
@@ -553,6 +585,7 @@ export default function App() {
     setStatus("sending…");
     try {
       await tellThread(tid, resolved.text);
+      setSentAt(Date.now());
       setStatus(`sent → ${view.thread.providerId}`);
       refreshThreadStatuses();
     } catch (err) {
@@ -690,6 +723,7 @@ export default function App() {
       else if (key.downArrow || key.pageDown) setScrollUp((s) => Math.max(0, s - 1));
       else if (key.ctrl && data === "x") {
         setStatus("stopping…");
+        setSentAt(null);
         void stopThread(view.thread.id).then(() => {
           setStatus("stopped");
           refreshThreadStatuses();
@@ -992,6 +1026,7 @@ export default function App() {
     Math.max(8, rows - 1) - 2,
     menuHeight(detailMenu),
     planMode ? 1 : 0,
+    waiting ? 1 : 0,
   );
   const maxScrollUp = Math.max(0, detailLineCount - visibleTranscriptRows);
 
@@ -1097,6 +1132,7 @@ export default function App() {
               elapsedSeconds,
               execution,
               planMode,
+              waiting,
               debug: process.env.BB_TUI_DEBUG
                 ? {
                     timelineLength: timeline.length,

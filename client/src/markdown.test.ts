@@ -73,10 +73,23 @@ test("blockquotes and rules get their own treatment", () => {
   assert.deepEqual(flatten(renderMarkdown("---", 6)), ["──────"]);
 });
 
-test("table rows are kept intact and the separator row is dimmed", () => {
-  const lines = renderMarkdown("| a | b |\n| --- | --- |\n| 1 | 2 |", 40);
-  assert.deepEqual(flatten(lines), ["| a | b |", "| --- | --- |", "| 1 | 2 |"]);
+test("tables lay out as aligned columns with a ruled header", () => {
+  const lines = renderMarkdown("| a | bb |\n| --- | ---: |\n| 1 | 2 |", 40);
+  assert.deepEqual(flatten(lines), ["a │ bb", "──┼───", "1 │  2"]);
+  // The header is bold, the rule is dim, and `---:` right-aligns its column.
+  assert.equal(lines[0]!.spans[0]!.bold, true);
   assert.equal(lines[1]!.spans[0]!.dim, true);
+});
+
+test("a table narrower than its content truncates rather than wrapping", () => {
+  const lines = renderMarkdown("| name | note |\n|---|---|\n| a | a very long note indeed |", 20);
+  assert.ok(lines.every((l) => flat(l).length <= 20));
+  assert.equal(lines.length, 3);
+});
+
+test("a half-arrived table still renders", () => {
+  assert.deepEqual(flatten(renderMarkdown("| a | b |", 40)), ["a │ b"]);
+  assert.deepEqual(flatten(renderMarkdown("| a | b |\n|---|---|", 40)), ["a │ b", "──┼──"]);
 });
 
 test("ANSI escapes and control bytes are stripped before layout", () => {

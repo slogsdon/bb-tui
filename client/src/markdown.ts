@@ -93,12 +93,22 @@ const BULLETS = ["•", "◦", "‣"];
 function parseBlocks(lines: string[], width: number, base: Span): Block[] {
   const out: Block[] = [];
   let inFence = false;
+  // A table is the one construct here that cannot be rendered a line at a time:
+  // column widths are a property of the whole thing. Rows collect until
+  // something that is not a row ends them.
+  let table: string[] = [];
 
   const pushBlank = () => {
     if (out.length > 0 && !out[out.length - 1]!.blank) out.push({ prefix: [], body: [], blank: true });
   };
+  const flushTable = () => {
+    if (table.length === 0) return;
+    out.push(...layoutTable(table, width, base));
+    table = [];
+  };
 
   for (const raw of lines) {
+    if (!TABLE_ROW.test(raw)) flushTable();
     if (FENCE.test(raw)) {
       inFence = !inFence;
       continue;
@@ -152,17 +162,105 @@ function parseBlocks(lines: string[], width: number, base: Span): Block[] {
     }
 
     if (TABLE_ROW.test(raw)) {
-      const sep = TABLE_SEP.test(raw);
-      out.push({
-        prefix: [],
-        body: sep ? [{ text: raw.trim(), dim: true }] : parseInline(raw.trim(), base),
-        noWrap: true,
-      });
+      table.push(raw);
       continue;
     }
 
     out.push({ prefix: [], body: parseInline(raw.trim(), base) });
   }
+  flushTable();
+  return out;
+}
+
+type Align = "left" | "right" | "center";
+
+/** Split `| a | b |` into its cells, without the empty edges the pipes make. */
+function tableCells(row: string): string[] {
+  const trimmed = row.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+/** Column alignment from the separator row's colons, GitHub's rule. */
+function tableAlign(cells: string[]): Align[] {
+  return cells.map((cell) => {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    return left && right ? "center" : right ? "right" : "left";
+  });
+}
+
+/** Fit natural column widths into the pane: shrink the widest column first, so
+ * one long prose cell cannot squeeze the short ones into uselessness. */
+function fitColumns(natural: number[], available: number): number[] {
+  const widths = [...natural];
+  let over = widths.reduce((n, w) => n + w, 0) - available;
+  while (over > 0) {
+    const widest = widths.indexOf(Math.max(...widths));
+    if ((widths[widest] ?? 0) <= 3) break;
+    widths[widest] = (widths[widest] ?? 0) - 1;
+    over -= 1;
+  }
+  return widths;
+}
+
+const padCell = (spans: Span[], width: number, align: Align, base: Span): Span[] => {
+  const room = Math.max(0, width - spanWidth(spans));
+  const left = align === "right" ? room : align === "center" ? Math.floor(room / 2) : 0;
+  return [
+    ...(left > 0 ? [{ ...base, text: " ".repeat(left) }] : []),
+    ...spans,
+    ...(room - left > 0 ? [{ ...base, text: " ".repeat(room - left) }] : []),
+  ];
+};
+
+/** Render buffered rows as an aligned table. Streaming-tolerant by
+ * construction: a header alone, or a header and its separator, is just a
+ * one-row table until the rest arrives. */
+function layoutTable(rows: string[], width: number, base: Span): Block[] {
+  const parsed = rows.map(tableCells);
+  const sepIndex = rows.findIndex((row) => TABLE_SEP.test(row));
+  const align = sepIndex >= 0 ? tableAlign(parsed[sepIndex] ?? []) : [];
+  const body = parsed.filter((_, index) => index !== sepIndex);
+  if (body.length === 0) return [];
+  const columns = Math.max(...body.map((cells) => cells.length));
+  const gap = 3; // " │ "
+  const available = Math.max(columns * 3, Math.max(8, width) - gap * (columns - 1));
+  const natural = Array.from({ length: columns }, (_, column) =>
+    Math.max(1, ...body.map((cells) => (cells[column] ?? "").length)),
+  );
+  const widths = fitColumns(natural, available);
+  // A separator row means the first row is a header; without one every row is
+  // data, which is what a half-arrived table looks like.
+  const hasHeader = sepIndex > 0;
+
+  const line = (cells: string[], header: boolean): Block => ({
+    prefix: [],
+    noWrap: true,
+    body: widths.flatMap((columnWidth, column) => {
+      const style = header ? { ...base, bold: true } : base;
+      const cell = truncateSpans(parseInline(cells[column] ?? "", style), columnWidth);
+      const alignment = align[column] ?? "left";
+      // Padding the last column left-aligned would be trailing whitespace, which
+      // costs real pane width and shows up as ragged padding.
+      const padded =
+        column === widths.length - 1 && alignment === "left"
+          ? cell
+          : padCell(cell, columnWidth, alignment, style);
+      return column === 0 ? padded : [{ text: " │ ", dim: true }, ...padded];
+    }),
+  });
+
+  const out: Block[] = [];
+  body.forEach((cells, index) => {
+    out.push(line(cells, hasHeader && index === 0));
+    if (hasHeader && index === 0) {
+      out.push({
+        prefix: [],
+        noWrap: true,
+        body: [{ text: widths.map((w) => "─".repeat(w)).join("─┼─"), dim: true }],
+      });
+    }
+  });
   return out;
 }
 

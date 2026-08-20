@@ -119,19 +119,61 @@ export async function discover(): Promise<ClientInfo> {
   return info;
 }
 
+/** The install line the client tells users to run. The range tracks the plugin
+ * version this client was released alongside — both packages ship from one tag,
+ * so a client that needs a newer plugin can always name it. */
+const PLUGIN_INSTALL_HINT =
+  `  bb plugin install npm:bb-plugin-bb-tui@^0.2.0 --yes\n` + `  bb plugin reload bb-tui`;
+
+/** Ask the server itself what it knows, rather than assuming the worst.
+ *
+ * Both non-CLI discovery paths used to fabricate a `pluginVersion: "?"` record
+ * and return it: the client then ran permanently degraded (no long poll) when
+ * the plugin was present, and failed with an opaque RPC error when it was not.
+ * One `getClientInfo` call separates the three states that actually differ —
+ * server unreachable, plugin absent, plugin answering — and recovers the real
+ * settings for the last one. `fetchImpl` is a seam for tests. */
+export async function probePlugin(
+  serverUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ClientInfo> {
+  let res: Response;
+  try {
+    res = await fetchImpl(`${serverUrl}/api/v1/plugins/bb-tui/rpc/getClientInfo`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "null",
+      signal: requestSignal(10_000),
+    });
+  } catch (err) {
+    throw new Error(
+      `cannot reach the bb server at ${serverUrl}\n` +
+        `  is bb running? (open the bb app, or start the bb daemon)\n` +
+        `  if bb runs elsewhere, set BB_TUI_SERVER_URL\n` +
+        `  (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+  // The plugin mounts the whole /plugins/bb-tui namespace, so a 404 here means
+  // the server is fine and the plugin is not installed — the one failure a new
+  // user is most likely to hit, and the one with an exact fix.
+  if (res.status === 404) {
+    throw new Error(
+      `the bb-tui plugin is not installed on the bb server at ${serverUrl}\n${PLUGIN_INSTALL_HINT}`,
+    );
+  }
+  const body = (await res.json().catch(() => null)) as { ok?: boolean; result?: ClientInfo } | null;
+  if (!body?.ok || !body.result) {
+    throw new Error(`bb-tui plugin at ${serverUrl} did not answer getClientInfo (${res.status})`);
+  }
+  // Keep the URL we actually reached: the plugin reports its configured
+  // `serverUrl`, which is exactly the value an operator overrides with
+  // BB_TUI_SERVER_URL when it does not resolve from here.
+  return { ...body.result, serverUrl };
+}
+
 async function discoverFresh(): Promise<ClientInfo> {
   const env = process.env.BB_TUI_SERVER_URL;
-  if (env) {
-    return {
-      serverUrl: env,
-      dataDir: "unknown",
-      version: "unknown",
-      pluginVersion: "?",
-      retentionDays: 0,
-      prefs: { hideReasoning: false, pollMs: 800 },
-      spawn: null,
-    };
-  }
+  if (env) return probePlugin(env);
   try {
     const { stdout } = await execFileP("bb", ["tui", "info"], {
       timeout: 10_000,
@@ -143,22 +185,18 @@ async function discoverFresh(): Promise<ClientInfo> {
     // fall through to runtime.json
   }
   const dataDir = path.join(os.homedir(), ".bb");
-  const rt = JSON.parse(await readFile(path.join(dataDir, "bb-app-runtime.json"), "utf8")) as {
-    serverUrl?: string;
-    version?: string;
-  };
-  if (!rt.serverUrl) {
-    throw new Error("cannot discover bb server: set BB_TUI_SERVER_URL or install the bb-tui plugin");
+  const rt = await readFile(path.join(dataDir, "bb-app-runtime.json"), "utf8").then(
+    (raw) => JSON.parse(raw) as { serverUrl?: string },
+    () => null,
+  );
+  if (!rt?.serverUrl) {
+    throw new Error(
+      `cannot find a bb server\n` +
+        `  start bb, or set BB_TUI_SERVER_URL to reach one elsewhere\n` +
+        `  if bb is running, install this client's server half:\n${PLUGIN_INSTALL_HINT}`,
+    );
   }
-  return {
-    serverUrl: rt.serverUrl,
-    dataDir,
-    version: rt.version ?? "unknown",
-    pluginVersion: "?",
-    retentionDays: 0,
-    prefs: { hideReasoning: false, pollMs: 800 },
-    spawn: null,
-  };
+  return { ...(await probePlugin(rt.serverUrl)), dataDir };
 }
 
 /** Call a bb-tui plugin RPC method over loopback HTTP. `timeoutMs` has to clear
@@ -245,9 +283,11 @@ export function eventsSince(
 }
 
 /** Whether the connected plugin accepts `eventsSince({ waitMs })`. 0.2.0 is the
- * first build that does. An unknown version ("?" from the env-override or
- * runtime.json discovery paths) is treated as too old, which costs a poll
- * interval of latency and never an error. */
+ * first build that does. Every discovery path now reports the version the
+ * plugin itself gave, so "?" is only a very old cached record — treated as too
+ * old, which costs a poll interval of latency and never an error. This gate,
+ * not a version match, is how the client stays usable against an older plugin:
+ * new protocol additions degrade here rather than demanding an upgrade. */
 export function supportsLongPoll(pluginVersion: string | undefined): boolean {
   const m = /^(\d+)\.(\d+)/.exec(pluginVersion ?? "");
   if (!m) return false;

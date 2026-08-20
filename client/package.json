@@ -1,14 +1,37 @@
 {
-  "name": "@bb-tui/client",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "bin": {
-    "bb-tui": "./dist/cli.js"
+  "name": "bb-tui",
+  "version": "0.2.0",
+  "description": "A terminal UI for bb — browse threads, follow streaming agent output, and reply.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/slogsdon/bb-tui.git",
+    "directory": "client"
   },
+  "keywords": [
+    "bb",
+    "tui",
+    "terminal",
+    "ink",
+    "agents"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "bb-tui": "./dist/index.js",
+    "bb-tui-cli": "./dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
     "dev": "tsx src/index.tsx",
     "cli": "tsx src/cli.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "test": "tsx --test src/*.test.*",
     "typecheck": "tsc --noEmit"
   },

@@ -60,8 +60,13 @@ function stripAnsi(text: string): string {
 function renderFrame(node: React.ReactElement, columns = 120, rows = 40): string {
   const stdout = new TerminalOutput(columns, rows);
   const instance = render(node, { stdout: stdout as unknown as NodeJS.WriteStream, debug: true });
+  // Read the frame before unmounting. Ink's debug path writes the frame and
+  // returns without recording it as `lastOutput`, and unmount writes
+  // `lastOutput + "\n"` when it thinks it is running in CI — so on any machine
+  // with CI set, the last chunk is a bare newline rather than the frame.
+  const frame = stdout.chunks.at(-1) ?? "";
   instance.unmount();
-  return stripAnsi(stdout.chunks.at(-1) ?? "");
+  return stripAnsi(frame);
 }
 
 test("uses a 24-column thread list at 80 columns", () => {

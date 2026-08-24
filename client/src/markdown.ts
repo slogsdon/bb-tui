@@ -383,22 +383,47 @@ const ROLE_STYLE: Record<TranscriptBlock["role"], { prefix: Span[]; base: Span }
   reasoning: { prefix: [{ text: "~ ", dim: true }], base: { text: "", dim: true, italic: true } },
 };
 
+// Second cache layer, above the markdown one and keyed on block identity rather
+// than text. The two catch different misses and both are needed:
+//
+//   - This one holds the gutter/padding pass, which the markdown cache never
+//     saw. Without it every block in the transcript reallocated one array per
+//     rendered line on every poll tick, to display the ~30 lines that fit.
+//   - The markdown cache below still carries the 4s timeline refresh, which
+//     rebuilds every block object from scratch and so misses here by identity
+//     while hitting there by text.
+//
+// Weak, so a block dropped by the history cap or a thread switch is collected
+// with it; no cap to tune.
+const blockCache = new WeakMap<TranscriptBlock, { width: number; lines: MdLine[] }>();
+
+function blockLines(block: TranscriptBlock, width: number): MdLine[] {
+  const hit = blockCache.get(block);
+  if (hit && hit.width === width) return hit.lines;
+  const style = ROLE_STYLE[block.role];
+  const child = (block.depth ?? 0) > 0;
+  const prefix = child ? [{ text: "  └ ", dim: true }] : style.prefix;
+  const prefixWidth = spanWidth(prefix);
+  const rendered = renderMarkdown(block.text, Math.max(4, width - prefixWidth), style.base);
+  const pad: Span = { text: " ".repeat(prefixWidth) };
+  const lines = rendered.map((line, index) => ({
+    spans: index === 0 ? [...prefix, ...line.spans] : [pad, ...line.spans],
+  }));
+  blockCache.set(block, { width, lines });
+  return lines;
+}
+
 /** Render transcript blocks with a blank line between them and a role gutter on
  * the first line only, so a wrapped message reads as one message. */
 export function renderBlocks(blocks: TranscriptBlock[], width: number): MdLine[] {
   const out: MdLine[] = [];
   for (const block of blocks) {
-    const style = ROLE_STYLE[block.role];
-    const child = (block.depth ?? 0) > 0;
-    const prefix = child ? [{ text: "  └ ", dim: true }] : style.prefix;
-    const prefixWidth = spanWidth(prefix);
-    const lines = renderMarkdown(block.text, Math.max(4, width - prefixWidth), style.base);
+    const lines = blockLines(block, width);
     if (lines.length === 0) continue;
     if (out.length > 0) out.push({ spans: [] });
-    const pad: Span = { text: " ".repeat(prefixWidth) };
-    lines.forEach((line, index) => {
-      out.push({ spans: index === 0 ? [...prefix, ...line.spans] : [pad, ...line.spans] });
-    });
+    // Pushed one at a time rather than spread: a long block can exceed the
+    // argument limit that `push(...lines)` would hit.
+    for (const line of lines) out.push(line);
   }
   return out;
 }

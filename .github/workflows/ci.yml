@@ -1,0 +1,69 @@
+# Everything a release needs proven, minus the release itself: publishing is a
+# local step (scripts/release.sh) so npm credentials never live in this repo.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # bb downloads its plugin build toolchain on first use.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bb/plugins/toolchain-*
+          key: bb-toolchain-${{ hashFiles('bb-plugin-bb-tui/package-lock.json') }}
+
+      - run: npm --prefix bb-plugin-bb-tui ci
+      - run: npm --prefix client ci
+
+      - run: scripts/check-versions.sh
+
+      - run: npm --prefix bb-plugin-bb-tui run typecheck
+      - run: npm --prefix bb-plugin-bb-tui test
+      - run: npm --prefix client run typecheck
+      - run: npm --prefix client test
+
+      - name: build both halves
+        run: |
+          npm --prefix bb-plugin-bb-tui run build
+          test -s bb-plugin-bb-tui/dist/server.js
+          node -e '
+            const m = require("./bb-plugin-bb-tui/dist/server.meta.json");
+            const p = require("./bb-plugin-bb-tui/package.json");
+            if (m.pluginVersion !== p.version) {
+              throw new Error(`artifact ${m.pluginVersion} != manifest ${p.version}`);
+            }
+          '
+          npm --prefix client run build
+          test -s client/dist/index.js
+          test -s client/dist/cli.js
+
+      # `files` in each package.json is what actually ships; dist/ is gitignored,
+      # and npm falls back to .gitignore without an allowlist. Catch an empty
+      # tarball here rather than on the machine doing the publishing.
+      # `npm pack` ignores --prefix and reads the cwd's package.json.
+      - name: the tarballs contain what they claim
+        run: |
+          (cd bb-plugin-bb-tui && npm pack --dry-run --json) > /tmp/plugin-pack.json
+          (cd client && npm pack --dry-run --json) > /tmp/client-pack.json
+          node -e '
+            const has = (f, want) => {
+              const files = require(f)[0].files.map((e) => e.path);
+              for (const w of want) {
+                if (!files.includes(w)) throw new Error(`${f} is missing ${w}`);
+              }
+            };
+            has("/tmp/plugin-pack.json", ["package.json", "server.ts", "dist/server.js"]);
+            has("/tmp/client-pack.json", ["package.json", "dist/index.js", "dist/cli.js"]);
+          '

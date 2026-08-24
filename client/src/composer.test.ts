@@ -6,6 +6,7 @@ import {
   layoutComposer,
   replaceToken,
   slashTokenAt,
+  stripEscapes,
   type Composer,
 } from "./composer.js";
 
@@ -142,4 +143,29 @@ test("an empty composer still yields one row", () => {
     cursorCol: 0,
     scrolled: false,
   });
+});
+
+const ESC = String.fromCharCode(27);
+
+test("a batch of arrow keys does not land in the message as text", () => {
+  // Ink parses the first escape sequence in a chunk and passes the rest
+  // through. Key repeat and paste both deliver them batched like this, and the
+  // remainder used to arrive as a literal "[A[A".
+  const held = `${ESC}[A${ESC}[A${ESC}[A${ESC}[B`;
+  assert.deepEqual(type(EMPTY, held), EMPTY);
+  assert.deepEqual(type(at("hi"), held), at("hi"));
+});
+
+test("text around a stray escape sequence is still typed", () => {
+  assert.equal(type(EMPTY, `ab${ESC}[Bcd`).text, "abcd");
+});
+
+test("a literal bracket sequence the user typed is left alone", () => {
+  // No ESC in front of it: this is real input, not a key Ink failed to parse.
+  assert.equal(type(EMPTY, "see [A] below").text, "see [A] below");
+  assert.equal(stripEscapes("a[Ab"), "a[Ab");
+});
+
+test("home and end sequences are dropped too, not just arrows", () => {
+  assert.equal(type(EMPTY, `${ESC}[H${ESC}[F${ESC}[3~x`).text, "x");
 });
